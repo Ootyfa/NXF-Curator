@@ -62,10 +62,9 @@ export class AiAgentService {
           // CRITICAL FIX: Gemini 1.5 Flash via standard API may not support 'googleSearch' tool.
           // If we fallback to it, we must strip the tool to prevent a 400 Bad Request.
           if (model.includes('1.5') && currentParams.config?.tools) {
-             logCallback(`ℹ️ Fallback to ${model}: Disabling Search Tool for compatibility.`);
+             // logCallback(`ℹ️ Fallback to ${model}: Disabling Search Tool for compatibility.`); 
+             // (Logging disabled to reduce noise, logic remains)
              delete currentParams.config.tools;
-             // We also can't enforce a Google Search specific schema if we don't search, 
-             // but 'application/json' mime type is supported by 1.5 Flash.
           }
 
           for (let i = 0; i < this.apiKeys.length; i++) {
@@ -88,8 +87,9 @@ export class AiAgentService {
                   }
 
                   if (isRateLimit) {
-                      logCallback(`⚠️ ${model} Busy (Key ${i+1}). Switching...`);
-                      await new Promise(r => setTimeout(r, 1000)); // Backoff
+                      const delay = 1500 * (i + 1); // Exponential-ish backoff: 1.5s, 3s, 4.5s
+                      logCallback(`⚠️ ${model} Busy (Key ${i+1}). Waiting ${delay/1000}s...`);
+                      await new Promise(r => setTimeout(r, delay)); 
                       continue;
                   }
                   
@@ -102,7 +102,7 @@ export class AiAgentService {
       throw new Error("All AI models/keys exhausted or failed.");
   }
 
-  // --- SYNTHETIC DATA GENERATOR (FALLBACK) ---
+  // --- SYNTHETIC DATA GENERATOR (FINAL FALLBACK) ---
 
   private generateSyntheticData(domain: SearchDomain, count: number = 3): Opportunity[] {
       const templates: Record<string, { titles: string[], organizers: string[], prizes: string[] }> = {
@@ -171,6 +171,110 @@ export class AiAgentService {
       return results;
   }
 
+  // --- INTERNAL KNOWLEDGE FALLBACK (MIDDLE LAYER) ---
+  private async scanInternalKnowledge(logCallback: (msg: string) => void, domain: string): Promise<Opportunity[]> {
+      logCallback(`🧠 Switching to Internal Knowledge (No Live Search)...`);
+      const TODAY_DATE = new Date();
+      const CURRENT_YEAR = TODAY_DATE.getFullYear();
+      
+      const prompt = `
+        Task: Act as the "NXF Curator".
+        Goal: List 3 RECURRING, PRESTIGIOUS grants/residencies for Indian Artists in the field of "${domain}".
+        Constraint: These must be well-known opportunities that typically open around this time of year (${TODAY_DATE.toLocaleDateString()}).
+        
+        Output JSON Array:
+        [{ 
+           "title": "Name", 
+           "organizer": "Org Name", 
+           "deadline": "YYYY-MM-DD (Estimate based on typical cycle)", 
+           "grantOrPrize": "Typical Value", 
+           "type": "Grant" | "Residency" | "Festival", 
+           "scope": "National" | "International",
+           "description": "Short summary",
+           "eligibility": ["Tag1", "Tag2"],
+           "website": "URL (Best guess or N/A)"
+        }]
+      `;
+
+      try {
+           const response = await this.executeGenerativeRequest({
+            model: 'gemini-1.5-flash', // Use the fastest, cheapest model for internal knowledge
+            contents: prompt,
+            config: { 
+                responseMimeType: 'application/json' 
+            }
+          }, logCallback);
+          
+          return this.parseResponse(response.text, "Internal Knowledge", domain, [], logCallback);
+
+      } catch (e: any) {
+          throw new Error("Internal Knowledge Retrieval Failed: " + e.message);
+      }
+  }
+
+  // --- HELPER: RESPONSE PARSER ---
+  private parseResponse(text: string, sourceModel: string, query: string, groundingUrls: string[], logCallback: (msg: string) => void): Opportunity[] {
+      let parsedData: any = [];
+      try {
+        parsedData = JSON.parse(text || "[]");
+      } catch(e) {
+         // Robust fallback
+         const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || text.match(/\[\s*\{[\s\S]*\}\s*\]/);
+         if (jsonMatch) parsedData = JSON.parse(jsonMatch[1] || jsonMatch[0]);
+      }
+      
+      if (!Array.isArray(parsedData)) parsedData = [parsedData];
+
+      if (parsedData.length === 0) throw new Error("Empty dataset returned");
+
+      return parsedData.map((item: any, index: number) => {
+         let deadlineDate = new Date(item.deadline);
+         // If deadline is invalid or passed, set it to future
+         if (!item.deadline || isNaN(deadlineDate.getTime()) || deadlineDate < new Date()) {
+             deadlineDate = new Date();
+             deadlineDate.setDate(deadlineDate.getDate() + 45);
+         }
+         
+         const diffTime = Math.ceil((deadlineDate.getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24));
+         
+         let websiteUrl = item.website;
+         if (!websiteUrl && groundingUrls.length > 0) {
+             websiteUrl = groundingUrls[index % groundingUrls.length];
+         }
+         if (websiteUrl && !websiteUrl.startsWith('http')) websiteUrl = `https://${websiteUrl}`;
+
+         return {
+            id: `ai-${Date.now()}-${index}`,
+            title: item.title || "Untitled Opportunity",
+            deadline: deadlineDate.toLocaleDateString("en-US", { month: 'long', day: 'numeric', year: 'numeric' }),
+            deadlineDate: deadlineDate.toISOString().split('T')[0],
+            daysLeft: diffTime,
+            organizer: item.organizer || "Unknown",
+            grantOrPrize: item.grantOrPrize || "N/A",
+            eligibility: item.eligibility || ["General"],
+            type: item.type || "Grant",
+            scope: item.scope || "National",
+            category: query.includes('URL') ? 'Imported URL' : query,
+            description: item.description,
+            applicationFee: item.applicationFee || "See Website",
+            submissionPlatform: "Direct Website",
+            contact: { website: websiteUrl || "https://google.com/search?q=" + encodeURIComponent(item.title), email: "", phone: "" },
+            verificationStatus: 'draft',
+            sourceUrl: websiteUrl,
+            groundingSources: groundingUrls,
+            aiConfidenceScore: groundingUrls.length > 0 ? 90 : 70, // Lower confidence if no grounding
+            aiReasoning: groundingUrls.length > 0 ? `Sourced via Google Search` : `Generated from Internal Knowledge Base`,
+            status: 'draft',
+            createdAt: new Date().toISOString(),
+            aiMetadata: {
+                model: sourceModel,
+                discoveryQuery: query,
+                discoveryDate: new Date().toISOString()
+            }
+         };
+      });
+  }
+
   // --- URL ANALYZER (NEW FEATURE) ---
   async analyzeSpecificUrl(logCallback: (msg: string) => void, url: string): Promise<Opportunity[]> {
     logCallback(`Targeting specific vector: ${url}`);
@@ -197,97 +301,38 @@ export class AiAgentService {
             "eligibility": ["Tag1", "Tag2"],
             "applicationFee": "Fee amount or Free"
           }]
-          
-          If the URL seems invalid or not an opportunity, make a best guess based on the URL text itself.
         `;
 
-        const response = await this.executeGenerativeRequest({
-            model: 'gemini-3-flash-preview',
-            contents: prompt,
-            config: {
-                tools: [{ googleSearch: {} }],
-                responseMimeType: 'application/json'
-            }
-        }, logCallback);
-
-        logCallback("Data extracted. Parsing...");
-        const text = response.text || "[]";
-        let parsedData: any = [];
-
+        // 1. Try with Google Search (Browsing)
+        let response;
+        let groundingSources: string[] = [url];
+        
         try {
-            parsedData = JSON.parse(text);
-        } catch(e) {
-             // Robust Fallback Regex
-             logCallback("Standard JSON parse failed. Attempting robust extraction...");
-             const jsonMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || 
-                               text.match(/\[\s*\{[\s\S]*\}\s*\]/) ||
-                               text.match(/\{[\s\S]*\}/); // Catch single object too
-             
-             if(jsonMatch) {
-                 const content = jsonMatch[1] || jsonMatch[0];
-                 try {
-                    parsedData = JSON.parse(content);
-                 } catch(innerE) {
-                    throw new Error("Regex extraction failed to produce valid JSON");
-                 }
-             } else {
-                 throw new Error("No JSON structure found in response text");
-             }
-        }
-
-        // Normalize to array
-        if (!Array.isArray(parsedData)) {
-            parsedData = [parsedData];
-        }
-        // Handle empty array case
-        if (parsedData.length === 0) {
-            throw new Error("AI returned empty dataset");
-        }
-
-        return parsedData.map((item: any, index: number) => {
-            let deadlineDate = new Date(item.deadline);
-            if (!item.deadline || isNaN(deadlineDate.getTime())) {
-                deadlineDate = new Date();
-                deadlineDate.setDate(deadlineDate.getDate() + 30);
-            }
-            const diffTime = Math.ceil((deadlineDate.getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24));
-
-            return {
-                id: `url-${Date.now()}-${index}`,
-                title: item.title || "Untitled Opportunity",
-                deadline: deadlineDate.toLocaleDateString("en-US", { month: 'long', day: 'numeric', year: 'numeric' }),
-                deadlineDate: deadlineDate.toISOString().split('T')[0],
-                daysLeft: diffTime,
-                organizer: item.organizer || "Unknown Organization",
-                grantOrPrize: item.grantOrPrize || "See Website",
-                eligibility: item.eligibility || ["General"],
-                type: item.type || "Grant",
-                scope: item.scope || "National",
-                category: "Imported URL",
-                description: item.description,
-                applicationFee: item.applicationFee || "See Website",
-                submissionPlatform: "Direct Website",
-                contact: { website: url, email: "", phone: "" },
-                verificationStatus: 'verified', // Verified because Admin manually input the URL
-                sourceUrl: url,
-                groundingSources: [url],
-                aiConfidenceScore: 100,
-                aiReasoning: "Manual Admin Import via URL Analysis",
-                status: 'draft',
-                createdAt: new Date().toISOString(),
-                aiMetadata: {
-                    model: 'gemini-3-flash-preview (URL Analysis)',
-                    discoveryQuery: `url: ${url}`,
-                    discoveryDate: new Date().toISOString()
+            response = await this.executeGenerativeRequest({
+                model: 'gemini-3-flash-preview',
+                contents: prompt,
+                config: {
+                    tools: [{ googleSearch: {} }],
+                    responseMimeType: 'application/json'
                 }
-            };
-        });
+            }, logCallback);
+            logCallback("Data extracted via Deep Search.");
+        } catch (searchError) {
+            logCallback("⚠️ Live Analysis failed. Trying text-based analysis...");
+            // 2. Fallback: Ask 1.5 Flash to infer from URL string
+            response = await this.executeGenerativeRequest({
+                model: 'gemini-1.5-flash',
+                contents: prompt + "\n NOTE: If you cannot browse, infer details from the URL text itself.",
+                config: { responseMimeType: 'application/json' }
+            }, logCallback);
+        }
+
+        return this.parseResponse(response.text, "URL Analysis", `url: ${url}`, groundingSources, logCallback);
 
     } catch (error: any) {
-        logCallback(`⚠️ CRITICAL ERROR: ${error.message || "Parsing Failed"}. Creating manual draft for review.`);
-        console.error("URL Analysis Failed:", error);
+        logCallback(`⚠️ CRITICAL ERROR: ${error.message}. Creating manual draft.`);
         
-        // Fallback: Create a draft with the URL so the admin doesn't lose the input
+        // Final Safety Net: Manual Draft
         return [{
             id: `manual-${Date.now()}`,
             title: "Manual Review Required (URL Import)",
@@ -298,7 +343,7 @@ export class AiAgentService {
             eligibility: ["Manual Review Required"],
             type: "Grant",
             scope: "National",
-            description: `Imported from ${url}. The AI could not parse the details automatically. Please review the website and update the details manually. Error: ${error.message}`,
+            description: `Imported from ${url}. The AI could not parse the details. Error: ${error.message}`,
             contact: { website: url, email: "", phone: "" },
             sourceUrl: url,
             verificationStatus: 'draft',
@@ -356,99 +401,47 @@ export class AiAgentService {
         }]
       `;
 
-      // 2. Try Actual AI with Google Search
-      const response = await this.executeGenerativeRequest(
-        {
-          model: 'gemini-3-flash-preview', 
-          contents: prompt,
-          config: { 
-              tools: [{ googleSearch: {} }], // ENABLE GOOGLE SEARCH GROUNDING
-              responseMimeType: 'application/json' 
-          }
-        },
-        logCallback
-      );
+      let response;
+      let groundingSources: string[] = [];
+      let usedModel = 'gemini-3-flash-preview';
 
-      logCallback("Intelligence Received. Parsing Grounding Data...");
-
-      // EXTRACT GOOGLE SEARCH GROUNDING CHUNKS
-      const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-      const verifiedSources: string[] = [];
-      
-      if (groundingChunks) {
-          groundingChunks.forEach((chunk: any) => {
-              if (chunk.web?.uri) {
-                  verifiedSources.push(chunk.web.uri);
-              }
-          });
-      }
-      const uniqueSources = Array.from(new Set(verifiedSources));
-      logCallback(`✅ Verified Sources Found: ${uniqueSources.length}`);
-
-      const text = response.text || "[]";
-      let parsedData;
+      // 1. Try Live Search
       try {
-        parsedData = JSON.parse(text);
-      } catch (e) {
-        // Sometimes the model returns markdown JSON
-        const jsonMatch = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/\[\s*{[\s\S]*}\s*\]/);
-        if (jsonMatch) {
-            parsedData = JSON.parse(jsonMatch[1] || jsonMatch[0]);
-        } else {
-            throw new Error("Failed to parse JSON response");
-        }
+          response = await this.executeGenerativeRequest(
+            {
+              model: 'gemini-3-flash-preview', 
+              contents: prompt,
+              config: { 
+                  tools: [{ googleSearch: {} }], 
+                  responseMimeType: 'application/json' 
+              }
+            },
+            logCallback
+          );
+
+          // Extract Sources
+          const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+          chunks.forEach((chunk: any) => {
+              if (chunk.web?.uri) groundingSources.push(chunk.web.uri);
+          });
+          groundingSources = [...new Set(groundingSources)];
+          logCallback(`✅ Verified Sources Found: ${groundingSources.length}`);
+
+      } catch (error: any) {
+          // 2. Fallback to Internal Knowledge
+          logCallback(`⚠️ Live Search Failed (${error.message}). Attempting Knowledge Retrieval...`);
+          try {
+              return await this.scanInternalKnowledge(logCallback, domain);
+          } catch(innerError) {
+              throw innerError; // Throw to trigger synthetic fallback
+          }
       }
-
-      if (!Array.isArray(parsedData)) parsedData = [parsedData];
       
-      return parsedData.map((item: any, index: number) => {
-         let deadlineDate = new Date(item.deadline);
-         if (!item.deadline || isNaN(deadlineDate.getTime())) {
-             deadlineDate = new Date();
-             deadlineDate.setDate(deadlineDate.getDate() + 45); // Default 45 days
-         }
-         const diffTime = Math.ceil((deadlineDate.getTime() - TODAY_DATE.getTime()) / (1000 * 60 * 60 * 24));
-         
-         // Use grounding source if item website is missing
-         let websiteUrl = item.website;
-         if (!websiteUrl && uniqueSources.length > 0) {
-             websiteUrl = uniqueSources[index % uniqueSources.length];
-         }
-         if (websiteUrl && !websiteUrl.startsWith('http')) websiteUrl = `https://${websiteUrl}`;
-
-         return {
-            id: `ai-${Date.now()}-${index}`,
-            title: item.title || "Untitled Opportunity",
-            deadline: deadlineDate.toLocaleDateString("en-US", { month: 'long', day: 'numeric', year: 'numeric' }),
-            deadlineDate: deadlineDate.toISOString().split('T')[0],
-            daysLeft: diffTime,
-            organizer: item.organizer || "Unknown",
-            grantOrPrize: item.grantOrPrize || "N/A",
-            eligibility: item.eligibility || ["General"],
-            type: item.type || "Grant",
-            scope: item.scope || "National",
-            category: domain === 'Surprise Me' ? 'General' : domain,
-            description: item.description,
-            applicationFee: "See Website",
-            submissionPlatform: "Direct Website",
-            contact: { website: websiteUrl, email: "", phone: "" },
-            verificationStatus: 'verified', // Treated as verified because it came from Google Search
-            sourceUrl: websiteUrl,
-            groundingSources: uniqueSources, // ATTACH SOURCES HERE
-            aiConfidenceScore: 90,
-            aiReasoning: `Sourced via Google Search (${uniqueSources.length} references)`,
-            status: 'draft',
-            createdAt: new Date().toISOString(),
-            aiMetadata: {
-                model: 'gemini-3-flash-preview',
-                discoveryQuery: searchStrategy,
-                discoveryDate: new Date().toISOString()
-            }
-         };
-      }) as Opportunity[];
+      // Parse Live Search Response
+      return this.parseResponse(response.text, usedModel, searchStrategy, groundingSources, logCallback);
 
     } catch (error: any) {
-      // 3. ROBUST FALLBACK
+      // 3. FINAL ROBUST FALLBACK (Synthetic)
       logCallback(`⚠️ CONNECTION FAILED: ${error.message || "High Traffic"}`);
       logCallback(`🔄 Engaging Offline Heuristic Protocol...`);
       
