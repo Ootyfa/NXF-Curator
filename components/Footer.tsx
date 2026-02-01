@@ -10,6 +10,7 @@ const Footer: React.FC = () => {
             <Link to="/about" className="hover:text-primary transition-colors">About Us</Link>
             <Link to="/privacy" className="hover:text-primary transition-colors">Privacy Policy</Link>
             <Link to="/contact" className="hover:text-primary transition-colors">Contact Us</Link>
+            <Link to="/agent" className="hover:text-primary transition-colors text-gray-400">Agent Access</Link>
           </div>
           <p className="text-xs text-gray-400">
             &copy; 2024 NXF Curator. All rights reserved.

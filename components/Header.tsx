@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Menu, X, User, LogOut } from 'lucide-react';
+import { Menu, X, User, LogOut, Terminal } from 'lucide-react';
 import { supabase } from '../services/supabase';
 
 const Header: React.FC = () => {
@@ -45,13 +45,21 @@ const Header: React.FC = () => {
           <nav className="hidden md:flex items-center space-x-6">
             {user ? (
               <>
+                <Link 
+                  to="/agent" 
+                  className="flex items-center text-sm font-medium text-text hover:text-primary transition-colors bg-gray-50 px-3 py-1.5 rounded-md border border-gray-200"
+                >
+                  <Terminal size={14} className="mr-2" />
+                  Agent Dashboard
+                </Link>
+                <div className="h-4 w-px bg-gray-300 mx-2"></div>
                 <div className="flex items-center text-sm font-medium text-secondary">
                   <User size={16} className="mr-2 text-primary" />
                   <span>{user.user_metadata?.name || user.email}</span>
                 </div>
                 <button 
                   onClick={handleSignOut}
-                  className="flex items-center text-sm font-medium text-text hover:text-red-500 transition-colors"
+                  className="flex items-center text-sm font-medium text-text hover:text-red-500 transition-colors ml-4"
                 >
                   <LogOut size={16} className="mr-1" />
                   Sign Out
@@ -96,9 +104,16 @@ const Header: React.FC = () => {
                   <div className="block text-base font-bold text-secondary border-b border-gray-100 pb-2 mb-2">
                      Hi, {user.user_metadata?.name || 'Creator'}
                   </div>
+                  <Link 
+                    to="/agent"
+                    onClick={() => setIsMenuOpen(false)}
+                    className="flex items-center text-base font-medium text-secondary hover:text-primary p-2 bg-gray-50 rounded-md"
+                  >
+                    <Terminal size={18} className="mr-2" /> Agent Dashboard
+                  </Link>
                   <button 
                     onClick={handleSignOut}
-                    className="flex items-center text-base font-medium text-red-500 hover:text-red-600"
+                    className="flex items-center text-base font-medium text-red-500 hover:text-red-600 mt-2"
                   >
                     <LogOut size={18} className="mr-2" /> Sign Out
                   </button>
