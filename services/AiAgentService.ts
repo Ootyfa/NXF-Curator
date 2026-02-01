@@ -34,7 +34,7 @@ export class AiAgentService {
     this.apiKeys = [...new Set(collectedKeys)];
   }
 
-  // Robust Executor: Handles Key Rotation & Exponential Backoff & Model Fallback
+  // Robust Executor: Handles Key Rotation & Model Fallback
   private async executeGenerativeRequest(
     baseParams: { model: string, contents: any, config: any },
     logCallback: (msg: string) => void
@@ -44,24 +44,38 @@ export class AiAgentService {
           throw new Error("No API Keys configured. Please check .env file.");
       }
 
-      let attempt = 0;
-      const maxRetries = 3; // Total backoff cycles
-      let currentKeyIndex = 0; // Start with the first key
-      
-      // Fallback Strategy
-      // gemini-2.0-flash-exp was 404ing, switching to gemini-3-pro-preview which is a valid model in the prompt list
-      const primaryModel = 'gemini-3-flash-preview';
-      const fallbackModel = 'gemini-3-pro-preview';
-      let currentModel = baseParams.model;
+      // Priority List: Try latest features first, fallback to stability
+      const modelHierarchy = [
+          'gemini-3-flash-preview',  // Target
+          'gemini-2.0-flash',        // Stable Backup
+          'gemini-1.5-flash'         // Emergency Backup
+      ];
 
-      // We will loop until we succeed or run out of retry attempts
-      while (attempt <= maxRetries) {
+      // Ensure the requested model is tried first
+      if (!modelHierarchy.includes(baseParams.model)) {
+          modelHierarchy.unshift(baseParams.model);
+      } else {
+         const idx = modelHierarchy.indexOf(baseParams.model);
+         if (idx > 0) {
+             modelHierarchy.splice(idx, 1);
+             modelHierarchy.unshift(baseParams.model);
+         }
+      }
+
+      let currentModelIndex = 0;
+      let currentKeyIndex = 0;
+      let attempt = 0;
+      const maxRetries = 6; // Allow enough retries to cycle keys and models
+
+      while (attempt < maxRetries) {
+          const currentModel = modelHierarchy[currentModelIndex];
+          const apiKey = this.apiKeys[currentKeyIndex];
+
           try {
-              // 1. Pick current key
-              const apiKey = this.apiKeys[currentKeyIndex];
               const ai = new GoogleGenAI({ apiKey });
               
-              // 2. Execute Request
+              // logCallback(`Trying ${currentModel} with Key ${currentKeyIndex + 1}...`);
+              
               return await ai.models.generateContent({
                   ...baseParams,
                   model: currentModel
@@ -70,67 +84,61 @@ export class AiAgentService {
           } catch (error: any) {
               const errorMsg = error.message || JSON.stringify(error);
               const isRateLimit = errorMsg.includes('429') || errorMsg.includes('RESOURCE_EXHAUSTED') || error.status === 429;
-              
-              // DETAILED LOGGING FOR DEBUGGING
-              console.error(`API Error (Key ${currentKeyIndex + 1}, Model ${currentModel}):`, error);
+              const isNotFound = errorMsg.includes('404') || errorMsg.includes('not found');
+              const isOverloaded = errorMsg.includes('503') || errorMsg.includes('overloaded');
 
-              if (isRateLimit) {
-                  logCallback(`⚠️ Quota hit on Key ${currentKeyIndex + 1}/${this.apiKeys.length}.`);
+              console.warn(`Attempt failed (Key: ${currentKeyIndex+1}, Model: ${currentModel}):`, errorMsg.substring(0, 100));
+
+              // STRATEGY 1: Rate Limit / Overloaded -> Rotate Key, then Switch Model
+              if (isRateLimit || isOverloaded) {
+                  logCallback(`⚠️ ${isRateLimit ? 'Quota Hit' : 'Busy'}: ${currentModel} (Key ${currentKeyIndex + 1})`);
                   
-                  // A. Multi-Key Failover: Switch to next key immediately if available
+                  // A. Try next key (if available)
                   if (this.apiKeys.length > 1) {
-                      const nextIndex = (currentKeyIndex + 1) % this.apiKeys.length;
-                      
-                      // If we haven't looped back to the start yet in this "rotation", switch key
-                      if (nextIndex > currentKeyIndex) {
-                          currentKeyIndex = nextIndex;
-                          logCallback(`🔄 Switching to Key ${currentKeyIndex + 1}...`);
-                          continue; // Retry immediately with new key
-                      }
-                  }
-                  
-                  // B. Model Fallback: If we tried all keys on Primary Model and failed, try Fallback Model
-                  if (currentModel === primaryModel && attempt === 0) {
-                       logCallback(`⚠️ Primary model overloaded. Switching to fallback: ${fallbackModel}...`);
-                       currentModel = fallbackModel;
-                       currentKeyIndex = 0; // Reset to first key for the new model
-                       attempt++; // Count this as an attempt
-                       continue;
+                       const nextKeyIndex = (currentKeyIndex + 1) % this.apiKeys.length;
+                       // Only rotate key if we haven't just looped back to 0
+                       if (nextKeyIndex !== currentKeyIndex) {
+                           currentKeyIndex = nextKeyIndex;
+                           logCallback(`🔄 Rotating to Key #${currentKeyIndex + 1}...`);
+                           attempt++; 
+                           await new Promise(r => setTimeout(r, 1000));
+                           continue;
+                       }
                   }
 
-                  // C. Backoff: If we ran out of keys (or only have 1), we must wait.
-                  if (attempt < maxRetries) {
-                      const delay = 2000 * Math.pow(2, attempt); // 2s, 4s, 8s
-                      logCallback(`⏳ Cooling down for ${delay/1000}s...`);
-                      await new Promise(resolve => setTimeout(resolve, delay));
-                      
+                  // B. If keys exhausted (or single key), Switch Model
+                  if (currentModelIndex < modelHierarchy.length - 1) {
+                      currentModelIndex++;
+                      logCallback(`📉 Switching to stable model: ${modelHierarchy[currentModelIndex]}...`);
+                      currentKeyIndex = 0; // Reset key rotation for new model
                       attempt++;
-                      // After sleep, move to next key to keep spreading load
-                      currentKeyIndex = (currentKeyIndex + 1) % this.apiKeys.length;
                       continue;
                   }
-              } else {
-                  // If it's NOT a rate limit (e.g. 400 Bad Request, 403 Permission Denied, 404 Not Found)
-                  logCallback(`❌ API Error: ${errorMsg.substring(0, 100)}...`);
-                  
-                  if (errorMsg.includes('API key not valid')) {
-                       logCallback(`👉 Key #${currentKeyIndex + 1} is invalid.`);
-                  }
-                  if (errorMsg.includes('has not enabled Gemini')) {
-                       logCallback(`👉 Enable "Generative Language API" in Google Cloud Console.`);
-                  }
-                  if (errorMsg.includes('not found') && currentModel !== fallbackModel) {
-                       // If model not found, try fallback immediately
-                       logCallback(`⚠️ Model ${currentModel} not found. Switching to ${fallbackModel}...`);
-                       currentModel = fallbackModel;
-                       continue;
+
+                  // C. Wait and retry if everything else failed
+                  logCallback(`⏳ Cooling down (2s)...`);
+                  await new Promise(r => setTimeout(r, 2000));
+                  attempt++;
+                  continue;
+              }
+
+              // STRATEGY 2: Not Found (404) -> Switch Model Immediately
+              if (isNotFound) {
+                  // logCallback(`❌ ${currentModel} not available/found.`);
+                  if (currentModelIndex < modelHierarchy.length - 1) {
+                      currentModelIndex++;
+                      logCallback(`👉 Falling back to ${modelHierarchy[currentModelIndex]}...`);
+                      attempt++;
+                      continue;
                   }
               }
 
-              // Throw if we can't handle it
+              // If it's a permission error or something else, throw it
               throw error;
           }
       }
+      
+      throw new Error("Unable to connect to AI. Please check API Key or try again later.");
   }
 
   async scanWeb(logCallback: (msg: string) => void, domain: SearchDomain = 'Surprise Me'): Promise<Opportunity[]> {
@@ -301,12 +309,7 @@ export class AiAgentService {
       return valid;
 
     } catch (error: any) {
-      if (error.message?.includes('429') || error.message?.includes('RESOURCE_EXHAUSTED')) {
-         logCallback(`❌ CRITICAL ERROR: All API Keys Exhausted.`);
-         logCallback(`Tip: Add more keys to .env file to increase capacity.`);
-      } else {
-         logCallback(`❌ ERROR: ${error.message || error}`);
-      }
+      logCallback(`❌ ERROR: ${error.message || error}`);
       console.error("AI Agent Error:", error);
       return [];
     }
