@@ -4,50 +4,91 @@ import { Opportunity } from "../types";
 export type SearchDomain = 'Film' | 'Visual Arts' | 'Music' | 'Literature' | 'Performing Arts' | 'Surprise Me';
 
 export class AiAgentService {
-  private ai: GoogleGenAI;
-  private apiKey: string;
+  private apiKeys: string[] = [];
 
   constructor() {
-    // Safely retrieve API Key for browser environments (Vite uses import.meta.env)
+    // Safely retrieve API Key for browser environments
     const env = (import.meta as any).env || {};
-    const apiKey = env.VITE_GOOGLE_API_KEY || env.GOOGLE_API_KEY || (typeof process !== 'undefined' ? process.env?.API_KEY : '') || '';
+    const rawKeys = env.VITE_GOOGLE_API_KEY || env.GOOGLE_API_KEY || (typeof process !== 'undefined' ? process.env?.API_KEY : '') || '';
     
-    this.apiKey = apiKey;
-    this.ai = new GoogleGenAI({ apiKey });
+    // Support comma-separated keys for load balancing/failover
+    // Example: VITE_GOOGLE_API_KEY="key1,key2,key3"
+    this.apiKeys = rawKeys.split(',').map((k: string) => k.trim()).filter((k: string) => k.length > 0);
   }
 
-  // Wrapper for API calls with retry logic
-  private async callWithRetry(fn: () => Promise<any>, logCallback: (msg: string) => void, retries = 3, delay = 2000): Promise<any> {
-    try {
-      return await fn();
-    } catch (error: any) {
-      const isRateLimit = error.message?.includes('429') || error.message?.includes('RESOURCE_EXHAUSTED') || error.status === 429;
+  // Robust Executor: Handles Key Rotation & Exponential Backoff
+  private async executeGenerativeRequest(
+    params: { model: string, contents: any, config: any },
+    logCallback: (msg: string) => void
+  ): Promise<any> {
       
-      if (retries > 0 && isRateLimit) {
-        logCallback(`⚠️ Rate Limit Hit. Cooling down for ${delay/1000}s... (Attempts left: ${retries})`);
-        await new Promise(resolve => setTimeout(resolve, delay));
-        return this.callWithRetry(fn, logCallback, retries - 1, delay * 2); // Exponential backoff
+      if (this.apiKeys.length === 0) {
+          throw new Error("No API Keys configured. Please check .env file.");
       }
-      throw error;
-    }
+
+      let attempt = 0;
+      const maxRetries = 3; // Total backoff cycles
+      let currentKeyIndex = 0; // Start with the first key
+      
+      // We will loop until we succeed or run out of retry attempts
+      while (attempt <= maxRetries) {
+          try {
+              // 1. Pick current key
+              const apiKey = this.apiKeys[currentKeyIndex];
+              const ai = new GoogleGenAI({ apiKey });
+              
+              // 2. Execute Request
+              return await ai.models.generateContent(params);
+
+          } catch (error: any) {
+              const isRateLimit = error.message?.includes('429') || error.message?.includes('RESOURCE_EXHAUSTED') || error.status === 429;
+              
+              if (isRateLimit) {
+                  logCallback(`⚠️ Quota hit on Key ${currentKeyIndex + 1}/${this.apiKeys.length}.`);
+                  
+                  // A. Multi-Key Failover: Switch to next key immediately if available
+                  if (this.apiKeys.length > 1) {
+                      const nextIndex = (currentKeyIndex + 1) % this.apiKeys.length;
+                      
+                      // If we haven't looped back to the start yet in this "rotation", switch key
+                      // We track "rotations" by checking if nextIndex < currentKeyIndex (loop around)
+                      if (nextIndex > currentKeyIndex) {
+                          currentKeyIndex = nextIndex;
+                          logCallback(`🔄 Switching to Key ${currentKeyIndex + 1}...`);
+                          continue; // Retry immediately with new key
+                      }
+                  }
+                  
+                  // B. Backoff: If we ran out of keys (or only have 1), we must wait.
+                  if (attempt < maxRetries) {
+                      const delay = 2000 * Math.pow(2, attempt); // 2s, 4s, 8s
+                      logCallback(`⏳ All keys exhausted. Cooling down for ${delay/1000}s...`);
+                      await new Promise(resolve => setTimeout(resolve, delay));
+                      
+                      attempt++;
+                      // After sleep, move to next key to keep spreading load
+                      currentKeyIndex = (currentKeyIndex + 1) % this.apiKeys.length;
+                      continue;
+                  }
+              }
+
+              // If it's not a rate limit, or max retries hit, throw the error
+              throw error;
+          }
+      }
   }
 
   async scanWeb(logCallback: (msg: string) => void, domain: SearchDomain = 'Surprise Me'): Promise<Opportunity[]> {
-    if (!this.apiKey) {
+    if (this.apiKeys.length === 0) {
         logCallback("⛔ CRITICAL ERROR: API Key Missing.");
-        logCallback("Hint: Ensure VITE_GOOGLE_API_KEY is in your .env file and restart the server.");
+        logCallback("Hint: Add VITE_GOOGLE_API_KEY to .env (comma-separate for multiple keys).");
         return [];
     }
 
     logCallback(`Initializing Gemini 3 Curator Agent...`);
+    logCallback(`🔑 Loaded ${this.apiKeys.length} API Key(s) for rotation.`);
     
-    // DEBUG: Log masked key to help user verify changes
-    const maskedKey = this.apiKey.length > 8 
-        ? `${this.apiKey.substring(0, 4)}...${this.apiKey.substring(this.apiKey.length - 4)}`
-        : 'Invalid Key Format';
-    logCallback(`🔑 Active Credentials: ${maskedKey}`);
-    
-    // Use REAL TIME Context so Google Search results (which are current) are not filtered out
+    // Use REAL TIME Context
     const TODAY_DATE = new Date();
     const TODAY_STR = TODAY_DATE.toLocaleDateString("en-US", { year: 'numeric', month: 'long', day: 'numeric' });
     const CURRENT_YEAR = TODAY_DATE.getFullYear();
@@ -117,16 +158,16 @@ export class AiAgentService {
         ]
       `;
 
-      // API Call with Retry Logic
-      const response = await this.callWithRetry(
-        () => this.ai.models.generateContent({
+      // EXECUTE WITH FAILOVER LOGIC
+      const response = await this.executeGenerativeRequest(
+        {
           model: 'gemini-3-flash-preview',
           contents: prompt,
           config: {
             tools: [{ googleSearch: {} }],
             responseMimeType: 'application/json'
           }
-        }),
+        },
         logCallback
       );
 
@@ -146,7 +187,7 @@ export class AiAgentService {
       const uniqueSources: string[] = Array.from(new Set(rawSources));
       logCallback(`Sources Verified: ${uniqueSources.length} references found.`);
 
-      // Direct JSON parsing (ResponseMimeType ensures JSON)
+      // Direct JSON parsing
       const parsedData = JSON.parse(text);
 
       const opportunities: Opportunity[] = parsedData.map((item: any, index: number) => {
@@ -206,9 +247,8 @@ export class AiAgentService {
 
     } catch (error: any) {
       if (error.message?.includes('429') || error.message?.includes('RESOURCE_EXHAUSTED')) {
-         logCallback(`❌ ERROR: Quota Exceeded (429).`);
-         logCallback(`👉 Check your Google AI Studio dashboard billing.`);
-         logCallback(`👉 Update VITE_GOOGLE_API_KEY in .env if you have a new key.`);
+         logCallback(`❌ CRITICAL ERROR: All API Keys Exhausted.`);
+         logCallback(`Tip: Add more keys to .env file to increase capacity.`);
       } else {
          logCallback(`❌ ERROR: ${error.message || error}`);
       }
