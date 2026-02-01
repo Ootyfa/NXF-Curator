@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NXF Curator - Opportunities for Indian Creators</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script type="importmap">
+      {
+        "imports": {
+          "@google/genai": "https://esm.run/@google/genai",
+          "@supabase/supabase-js": "https://esm.sh/@supabase/supabase-js@^2.93.3",
+          "react": "https://esm.sh/react@^19.2.4",
+          "react/": "https://esm.sh/react@^19.2.4/",
+          "react-router-dom": "https://esm.sh/react-router-dom@^7.13.0",
+          "lucide-react": "https://esm.sh/lucide-react@^0.563.0",
+          "react-dom/": "https://esm.sh/react-dom@^19.2.4/"
+        }
+      }
+    </script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              primary: '#F59E0B', // Primary Gold
+              secondary: '#111827', // Text Dark (Gray 900)
+              background: '#FFFFFF', // White
+              surface: '#F9FAFB', // Light Gray for page backgrounds
+              text: '#4B5563', // Text Medium (Gray 600)
+              'text-light': '#9CA3AF', // Text Light (Gray 400)
+              border: '#E5E7EB', // Border (Gray 200)
+              accent: '#F59E0B', // Mapping accent to Gold for consistency
+              'accent-hover': '#D97706', // Darker Gold/Amber
+              success: '#10B981',
+              warning: '#F59E0B',
+              urgent: '#EF4444',
+            },
+            fontFamily: {
+              sans: ['Inter', 'sans-serif'],
+            },
+            boxShadow: {
+              'card': '0 1px 3px rgba(0,0,0,0.05)',
+            }
+          }
+        }
+      }
+    </script>
+    <style>
+      body {
+        font-family: 'Inter', sans-serif;
+        background-color: #FFFFFF;
+        color: #111827;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/index.js"></script>
+  </body>
+</html>
