@@ -22,14 +22,14 @@ const Auth: React.FC = () => {
     setError(null);
     setSuccessMsg(null);
 
-    // Handle Supabase Auth Redirects (e.g. Confirm Email click)
+    // Handle Supabase Auth Redirects
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      if (event === 'SIGNED_IN' || event === 'USER_UPDATED') {
+      if (event === 'SIGNED_IN') {
         navigate('/');
       }
     });
 
-    // Check for errors in the URL hash (returned by Supabase on failed redirects)
+    // Check for errors in the URL hash
     const hash = window.location.hash;
     if (hash && hash.includes('error=')) {
       const params = new URLSearchParams(hash.substring(1));
@@ -53,19 +53,27 @@ const Auth: React.FC = () => {
 
     try {
       if (mode === 'register') {
-        const { error } = await supabase.auth.signUp({
+        const { data, error } = await supabase.auth.signUp({
           email,
           password,
           options: {
             data: {
               name: fullName,
             },
-            // Explicitly set the redirect URL to your Netlify app URL if needed
-            // emailRedirectTo: 'https://your-app-name.netlify.app/auth' 
           },
         });
+        
         if (error) throw error;
-        setSuccessMsg("Registration successful! Please check your email to verify your account.");
+
+        // IMMEDIATE LOGIN CHECK:
+        // If "Confirm email" is disabled in Supabase, data.session will be present.
+        // We can redirect immediately.
+        if (data.session) {
+          navigate('/');
+        } else {
+          // If no session, the server requires email confirmation.
+          setSuccessMsg("Registration successful! Please check your email to verify your account.");
+        }
       } else {
         const { error } = await supabase.auth.signInWithPassword({
           email,
@@ -88,7 +96,7 @@ const Auth: React.FC = () => {
         {/* Header */}
         <div className="bg-primary/10 p-6 text-center border-b border-primary/20">
           <h2 className="text-xl font-bold text-secondary uppercase tracking-wide">
-            {mode === 'login' ? 'Welcome Back to NXF Curator' : 'Create Your NXF Curator Account'}
+            {mode === 'login' ? 'Welcome Back' : 'Create Account'}
           </h2>
         </div>
 
@@ -178,9 +186,6 @@ const Auth: React.FC = () => {
           <div className="mt-6 text-center text-sm">
             {mode === 'login' ? (
               <>
-                <p className="text-gray-600 mb-2">
-                  <a href="#" className="font-medium text-accent hover:text-primary">Forgot Password?</a>
-                </p>
                 <p className="text-gray-600">
                   New user? <Link to="/auth?mode=register" onClick={() => setMode('register')} className="font-medium text-accent hover:text-primary">Create Account</Link>
                 </p>
