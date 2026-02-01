@@ -9,11 +9,29 @@ export class AiAgentService {
   constructor() {
     // Safely retrieve API Key for browser environments
     const env = (import.meta as any).env || {};
-    const rawKeys = env.VITE_GOOGLE_API_KEY || env.GOOGLE_API_KEY || (typeof process !== 'undefined' ? process.env?.API_KEY : '') || '';
     
-    // Support comma-separated keys for load balancing/failover
-    // Example: VITE_GOOGLE_API_KEY="key1,key2,key3"
-    this.apiKeys = rawKeys.split(',').map((k: string) => k.trim()).filter((k: string) => k.length > 0);
+    // We check multiple variable names to allow users to add keys easily in hosting dashboards
+    const potentialVars = [
+        env.VITE_GOOGLE_API_KEY,          // Main Key
+        env.GOOGLE_API_KEY,               // Fallback
+        env.VITE_GOOGLE_API_KEY_2,        // Secondary Key
+        env.VITE_GOOGLE_API_KEY_3,        // Tertiary Key
+        env.VITE_GOOGLE_API_KEY_BACKUP,   // Backup Key
+        (typeof process !== 'undefined' ? process.env?.API_KEY : '')
+    ];
+
+    const collectedKeys: string[] = [];
+
+    potentialVars.forEach(val => {
+        if (val && typeof val === 'string') {
+            // Split by comma just in case a single var contains multiple keys
+            const keys = val.split(',').map(k => k.trim()).filter(k => k.length > 0);
+            collectedKeys.push(...keys);
+        }
+    });
+
+    // Remove duplicates
+    this.apiKeys = [...new Set(collectedKeys)];
   }
 
   // Robust Executor: Handles Key Rotation & Exponential Backoff
