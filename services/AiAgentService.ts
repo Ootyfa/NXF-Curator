@@ -5,48 +5,55 @@ export type SearchDomain = 'Film' | 'Visual Arts' | 'Music' | 'Literature' | 'Pe
 
 export class AiAgentService {
   private ai: GoogleGenAI;
+  private apiKey: string;
 
   constructor() {
     // Safely retrieve API Key for browser environments (Vite uses import.meta.env)
-    // We check import.meta.env first, then fallback to a safe check for process.env
     const env = (import.meta as any).env || {};
     const apiKey = env.VITE_GOOGLE_API_KEY || env.GOOGLE_API_KEY || (typeof process !== 'undefined' ? process.env?.API_KEY : '') || '';
     
+    this.apiKey = apiKey;
     this.ai = new GoogleGenAI({ apiKey });
   }
 
   async scanWeb(logCallback: (msg: string) => void, domain: SearchDomain = 'Surprise Me'): Promise<Opportunity[]> {
+    if (!this.apiKey) {
+        logCallback("⛔ CRITICAL ERROR: API Key Missing.");
+        logCallback("Hint: Ensure VITE_GOOGLE_API_KEY is in your .env file and restart the server.");
+        return [];
+    }
+
     logCallback(`Initializing Gemini 3 Curator Agent...`);
     
-    // CONTEXT: User specified date simulation
-    const SIMULATED_TODAY_STR = "January 30, 2026";
-    const SIMULATED_TODAY_DATE = new Date("2026-01-30");
+    // Use REAL TIME Context so Google Search results (which are current) are not filtered out
+    const TODAY_DATE = new Date();
+    const TODAY_STR = TODAY_DATE.toLocaleDateString("en-US", { year: 'numeric', month: 'long', day: 'numeric' });
+    const CURRENT_YEAR = TODAY_DATE.getFullYear();
 
     let searchStrategy = "";
 
     switch (domain) {
         case 'Film':
-            searchStrategy = "film grants India 2026 application open documentary short film funding";
+            searchStrategy = `film grants India ${CURRENT_YEAR} application open documentary short film funding`;
             break;
         case 'Visual Arts':
-            searchStrategy = "visual arts residencies India 2026 painters sculptors exhibition grants";
+            searchStrategy = `visual arts residencies India ${CURRENT_YEAR} open call painters sculptors`;
             break;
         case 'Music':
-            searchStrategy = "music production grants India 2026 independent musicians funding opportunities";
+            searchStrategy = `music production grants India ${CURRENT_YEAR} independent musicians funding`;
             break;
         case 'Literature':
-            searchStrategy = "writing fellowships India 2026 poetry fiction publishing grants";
+            searchStrategy = `writing fellowships India ${CURRENT_YEAR} poetry fiction publishing grants`;
             break;
         case 'Performing Arts':
-            searchStrategy = "theatre dance grants India 2026 performing arts funding cultural ministry";
+            searchStrategy = `theatre dance grants India ${CURRENT_YEAR} performing arts funding open call`;
             break;
         case 'Surprise Me':
         default:
             const strategies = [
-                "film grants India 2026",
-                "visual arts residencies India 2026",
-                "performing arts grants India 2026",
-                "literature grants India 2026"
+                `creative arts grants India ${CURRENT_YEAR} application open`,
+                `film festivals India ${CURRENT_YEAR} submission open`,
+                `artist residencies India ${CURRENT_YEAR} open call`
             ];
             searchStrategy = strategies[Math.floor(Math.random() * strategies.length)];
             break;
@@ -57,40 +64,35 @@ export class AiAgentService {
       logCallback(`Executing Search Strategy: "${searchStrategy}"`);
       
       const prompt = `
-        Context: Today is ${SIMULATED_TODAY_STR}.
+        Context: Today is ${TODAY_STR}.
         
         Task: Act as the "NXF Curator" for Indian Creators. 
-        Focus strictly on: ${domain}.
         Search query: "${searchStrategy}".
-        Find 4-6 high-quality, ACTIVE opportunities.
+        Find 3-5 high-quality, ACTIVE opportunities with deadlines AFTER ${TODAY_STR}.
         
         IMPORTANT: Classify the SCOPE:
         - "National": If the opportunity is organized by an Indian entity and primarily for Indians.
         - "International": If it is a global opportunity open to Indians.
 
-        Output JSON Format:
+        Output strictly a JSON array.
+
+        JSON Schema:
         [
           {
             "title": "Name",
             "organizer": "Org Name",
-            "deadline": "Date string",
+            "deadline": "YYYY-MM-DD",
             "grantOrPrize": "Value",
-            "type": "Festival | Grant | Lab | Residency",
-            "scope": "National | International",
-            "description": "One sentence summary",
-            "eligibility": "Who can apply (e.g., 'Visual Artists', 'Filmmakers')",
+            "type": "Festival" | "Grant" | "Lab" | "Residency",
+            "scope": "National" | "International",
+            "description": "Short summary",
+            "eligibility": "Target audience",
             "applicationFee": "Cost",
-            "submissionPlatform": "Website/Platform",
             "website": "URL",
             "aiConfidenceScore": 85, 
             "aiReasoning": "Why this is a good match"
           }
         ]
-
-        Rules:
-        1. Ignore expired deadlines (Before ${SIMULATED_TODAY_STR}).
-        2. Prioritize 2026 editions.
-        3. High confidence score (>80) requires a specific deadline and verified Indian eligibility.
       `;
 
       const response = await this.ai.models.generateContent({
@@ -98,14 +100,16 @@ export class AiAgentService {
         contents: prompt,
         config: {
           tools: [{ googleSearch: {} }],
+          responseMimeType: 'application/json'
         }
       });
 
-      logCallback("Parsing Intelligence...");
+      logCallback("Intelligence Received. Parsing...");
 
       const text = response.text || "";
+      if (!text) throw new Error("AI returned empty response.");
       
-      // Extract grounding
+      // Extract grounding sources
       const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks;
       const rawSources: string[] = [];
       if (chunks && Array.isArray(chunks)) {
@@ -114,22 +118,20 @@ export class AiAgentService {
         });
       }
       const uniqueSources: string[] = Array.from(new Set(rawSources));
+      logCallback(`Sources Verified: ${uniqueSources.length} references found.`);
 
-      // JSON Parsing
-      let jsonString = text.replace(/```json/g, '').replace(/```/g, '').trim();
-      const start = jsonString.indexOf('[');
-      const end = jsonString.lastIndexOf(']');
-      
-      if (start === -1 || end === -1) throw new Error("Invalid JSON response");
-
-      jsonString = jsonString.substring(start, end + 1);
-      const parsedData = JSON.parse(jsonString);
+      // Direct JSON parsing (ResponseMimeType ensures JSON)
+      const parsedData = JSON.parse(text);
 
       const opportunities: Opportunity[] = parsedData.map((item: any, index: number) => {
         let deadlineDate = new Date(item.deadline);
-        if (isNaN(deadlineDate.getTime())) deadlineDate = new Date("2026-12-31");
+        if (isNaN(deadlineDate.getTime())) {
+            // Fallback: 3 months from now
+            deadlineDate = new Date();
+            deadlineDate.setMonth(deadlineDate.getMonth() + 3);
+        }
 
-        const diffTime = Math.ceil((deadlineDate.getTime() - SIMULATED_TODAY_DATE.getTime()) / (1000 * 60 * 60 * 24));
+        const diffTime = Math.ceil((deadlineDate.getTime() - TODAY_DATE.getTime()) / (1000 * 60 * 60 * 24));
         
         let websiteUrl = item.website || uniqueSources[0] || "";
         if (websiteUrl && !websiteUrl.startsWith('http')) websiteUrl = `https://${websiteUrl}`;
@@ -137,13 +139,13 @@ export class AiAgentService {
         return {
           id: `ai-${Date.now()}-${index}`,
           title: item.title,
-          deadline: item.deadline,
+          deadline: deadlineDate.toLocaleDateString("en-US", { month: 'long', day: 'numeric', year: 'numeric' }),
           deadlineDate: deadlineDate.toISOString().split('T')[0],
           daysLeft: diffTime,
           organizer: item.organizer || "Unknown",
           grantOrPrize: item.grantOrPrize || "N/A",
           eligibility: [item.eligibility || "General"],
-          type: item.type,
+          type: item.type || "Grant",
           scope: item.scope || "National", 
           category: domain === 'Surprise Me' ? 'General' : domain, 
           description: item.description,
@@ -153,8 +155,8 @@ export class AiAgentService {
           verificationStatus: 'verified',
           sourceUrl: websiteUrl,
           groundingSources: uniqueSources,
-          aiConfidenceScore: item.aiConfidenceScore || 50,
-          aiReasoning: item.aiReasoning || "Automated finding",
+          aiConfidenceScore: item.aiConfidenceScore || 80,
+          aiReasoning: item.aiReasoning || "AI Discovered",
           status: 'draft',
           createdAt: new Date().toISOString(),
           
@@ -173,11 +175,12 @@ export class AiAgentService {
       });
 
       const valid = opportunities.filter(o => o.daysLeft >= 0);
-      logCallback(`Scan complete. ${valid.length} candidates found.`);
+      logCallback(`Scan complete. ${valid.length} active opportunities found.`);
       return valid;
 
-    } catch (error) {
-      console.error(error);
+    } catch (error: any) {
+      logCallback(`❌ ERROR: ${error.message || error}`);
+      console.error("AI Agent Error:", error);
       return [];
     }
   }

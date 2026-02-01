@@ -1,12 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { Terminal, Play, Cpu, Loader, CheckCircle, ExternalLink, Sparkles, Plus, XCircle, Inbox, RefreshCw, Mail, MousePointer, Target, BarChart2, TrendingUp, Users, Trash2 } from 'lucide-react';
+import { Terminal, Play, Cpu, Loader, CheckCircle, ExternalLink, Sparkles, Plus, XCircle, Inbox, RefreshCw, Mail, MousePointer, Target, BarChart2, TrendingUp, Users, Trash2, Lock, Key, ShieldAlert } from 'lucide-react';
 import { aiAgentService, SearchDomain } from '../services/AiAgentService';
 import { opportunityService } from '../services/OpportunityService';
 import { emailService } from '../services/EmailService';
 import { Opportunity, MockEmail } from '../types';
 import { Link } from 'react-router-dom';
+import Button from '../components/Button';
 
 const AgentScanner: React.FC = () => {
+  // --- AUTHENTICATION STATE ---
+  const [isAgentAuthenticated, setIsAgentAuthenticated] = useState(false);
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPass, setAuthPass] = useState('');
+  const [authError, setAuthError] = useState('');
+
+  // --- DASHBOARD STATE ---
   const [activeTab, setActiveTab] = useState<'inbox' | 'terminal' | 'outbox' | 'analytics'>('inbox');
   const [logs, setLogs] = useState<string[]>([]);
   const [isScanning, setIsScanning] = useState(false);
@@ -18,8 +26,18 @@ const AgentScanner: React.FC = () => {
   // Mission State
   const [selectedDomain, setSelectedDomain] = useState<SearchDomain>('Surprise Me');
 
-  // Load Data
+  // Check session on mount
   useEffect(() => {
+    const sessionToken = sessionStorage.getItem('nxf_agent_token');
+    if (sessionToken === 'verified') {
+      setIsAgentAuthenticated(true);
+    }
+  }, []);
+
+  // Load Data (ONLY if authenticated)
+  useEffect(() => {
+    if (!isAgentAuthenticated) return;
+
     const loadData = async () => {
       // Inbox
       const inboxData = await opportunityService.getInbox();
@@ -34,7 +52,20 @@ const AgentScanner: React.FC = () => {
       setAllOpportunities(allData);
     };
     loadData();
-  }, [refreshTrigger]);
+  }, [refreshTrigger, isAgentAuthenticated]);
+
+  const handleAgentLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    // Fixed Credentials Check
+    if (authEmail === 'nxfindiax@gmail.com' && authPass === 'Ooty2026!"§') {
+      setIsAgentAuthenticated(true);
+      sessionStorage.setItem('nxf_agent_token', 'verified');
+      setAuthError('');
+    } else {
+      setAuthError('Access Denied: Invalid Agent Credentials');
+      setAuthPass(''); // Clear password on fail
+    }
+  };
 
   const addLog = (msg: string) => {
     setLogs(prev => [`[${new Date().toLocaleTimeString()}] ${msg}`, ...prev].slice(0, 50));
@@ -116,6 +147,77 @@ const AgentScanner: React.FC = () => {
 
   const stats = calculateAnalytics();
 
+  // --- RENDER: LOCK SCREEN ---
+  if (!isAgentAuthenticated) {
+    return (
+      <div className="min-h-screen bg-gray-900 text-gray-100 flex flex-col items-center justify-center p-4">
+        <div className="max-w-md w-full bg-gray-800 rounded-lg border border-gray-700 shadow-2xl overflow-hidden">
+          <div className="bg-gray-900 p-6 border-b border-gray-700 flex flex-col items-center">
+             <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center border border-gray-600 mb-4 shadow-inner">
+               <Lock className="text-primary h-8 w-8" />
+             </div>
+             <h1 className="text-xl font-bold text-white tracking-widest">RESTRICTED ACCESS</h1>
+             <p className="text-xs text-red-400 font-mono mt-2 flex items-center">
+               <ShieldAlert size={12} className="mr-1" /> AUTHORIZED PERSONNEL ONLY
+             </p>
+          </div>
+          
+          <div className="p-8">
+            <form onSubmit={handleAgentLogin} className="space-y-6">
+              {authError && (
+                <div className="bg-red-900/20 border border-red-800 text-red-300 p-3 rounded text-sm text-center">
+                  {authError}
+                </div>
+              )}
+              
+              <div>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Agent ID</label>
+                <div className="relative">
+                  <Mail className="absolute left-3 top-2.5 text-gray-500" size={16} />
+                  <input 
+                    type="email" 
+                    value={authEmail}
+                    onChange={(e) => setAuthEmail(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-700 text-white rounded pl-10 pr-3 py-2 focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none transition-colors"
+                    placeholder="agent@nxfcurator.org"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Secure Passkey</label>
+                <div className="relative">
+                  <Key className="absolute left-3 top-2.5 text-gray-500" size={16} />
+                  <input 
+                    type="password" 
+                    value={authPass}
+                    onChange={(e) => setAuthPass(e.target.value)}
+                    className="w-full bg-gray-900 border border-gray-700 text-white rounded pl-10 pr-3 py-2 focus:border-primary focus:ring-1 focus:ring-primary focus:outline-none transition-colors"
+                    placeholder="••••••••••••"
+                  />
+                </div>
+              </div>
+
+              <button 
+                type="submit"
+                className="w-full bg-primary hover:bg-yellow-500 text-gray-900 font-bold py-3 rounded transition-colors shadow-lg shadow-primary/20"
+              >
+                AUTHENTICATE
+              </button>
+            </form>
+            
+            <div className="mt-6 text-center">
+              <Link to="/" className="text-xs text-gray-500 hover:text-gray-300 transition-colors">
+                &larr; Return to Public Site
+              </Link>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // --- RENDER: DASHBOARD (AUTHENTICATED) ---
   return (
     <div className="min-h-screen bg-gray-900 text-gray-100 pb-12 font-sans">
       <div className="max-w-6xl mx-auto px-4 py-8 sm:px-6">
@@ -164,6 +266,16 @@ const AgentScanner: React.FC = () => {
              
              <div className="h-8 w-px bg-gray-700 mx-1 hidden md:block"></div>
              
+             <button 
+                onClick={() => {
+                   sessionStorage.removeItem('nxf_agent_token');
+                   setIsAgentAuthenticated(false);
+                }}
+                className="text-xs text-red-400 hover:text-red-300 border border-red-900/50 bg-red-900/10 px-3 py-2 rounded hover:bg-red-900/20 transition-colors"
+             >
+                LOGOUT
+             </button>
+
              <Link to="/" className="text-sm text-gray-400 hover:text-white px-3 py-2 border border-gray-700 rounded-md transition-colors">
                 Public View
              </Link>
