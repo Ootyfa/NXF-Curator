@@ -49,8 +49,9 @@ export class AiAgentService {
       let currentKeyIndex = 0; // Start with the first key
       
       // Fallback Strategy
+      // gemini-2.0-flash-exp was 404ing, switching to gemini-3-pro-preview which is a valid model in the prompt list
       const primaryModel = 'gemini-3-flash-preview';
-      const fallbackModel = 'gemini-2.0-flash-exp';
+      const fallbackModel = 'gemini-3-pro-preview';
       let currentModel = baseParams.model;
 
       // We will loop until we succeed or run out of retry attempts
@@ -61,7 +62,6 @@ export class AiAgentService {
               const ai = new GoogleGenAI({ apiKey });
               
               // 2. Execute Request
-              // logCallback(`Attempting with Key #${currentKeyIndex + 1} using ${currentModel}...`);
               return await ai.models.generateContent({
                   ...baseParams,
                   model: currentModel
@@ -110,7 +110,7 @@ export class AiAgentService {
                       continue;
                   }
               } else {
-                  // If it's NOT a rate limit (e.g. 400 Bad Request, 403 Permission Denied)
+                  // If it's NOT a rate limit (e.g. 400 Bad Request, 403 Permission Denied, 404 Not Found)
                   logCallback(`❌ API Error: ${errorMsg.substring(0, 100)}...`);
                   
                   if (errorMsg.includes('API key not valid')) {
@@ -118,6 +118,12 @@ export class AiAgentService {
                   }
                   if (errorMsg.includes('has not enabled Gemini')) {
                        logCallback(`👉 Enable "Generative Language API" in Google Cloud Console.`);
+                  }
+                  if (errorMsg.includes('not found') && currentModel !== fallbackModel) {
+                       // If model not found, try fallback immediately
+                       logCallback(`⚠️ Model ${currentModel} not found. Switching to ${fallbackModel}...`);
+                       currentModel = fallbackModel;
+                       continue;
                   }
               }
 
@@ -210,7 +216,7 @@ export class AiAgentService {
       // EXECUTE WITH FAILOVER LOGIC
       const response = await this.executeGenerativeRequest(
         {
-          model: 'gemini-3-flash-preview', // Will fallback to 2.0-flash-exp if this fails
+          model: 'gemini-3-flash-preview', 
           contents: prompt,
           config: {
             tools: [{ googleSearch: {} }],
