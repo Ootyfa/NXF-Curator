@@ -7,7 +7,12 @@ export class AiAgentService {
   private ai: GoogleGenAI;
 
   constructor() {
-    this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    // Safely retrieve API Key for browser environments (Vite uses import.meta.env)
+    // We check import.meta.env first, then fallback to a safe check for process.env
+    const env = (import.meta as any).env || {};
+    const apiKey = env.VITE_GOOGLE_API_KEY || env.GOOGLE_API_KEY || (typeof process !== 'undefined' ? process.env?.API_KEY : '') || '';
+    
+    this.ai = new GoogleGenAI({ apiKey });
   }
 
   async scanWeb(logCallback: (msg: string) => void, domain: SearchDomain = 'Surprise Me'): Promise<Opportunity[]> {
