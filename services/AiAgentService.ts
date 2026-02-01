@@ -7,27 +7,32 @@ export class AiAgentService {
   private apiKeys: string[] = [];
 
   constructor() {
-    // Safely retrieve API Key for browser environments
-    const env = (import.meta as any).env || {};
-    
-    // We check multiple variable names
-    const potentialVars = [
-        env.VITE_GOOGLE_API_KEY,          
-        env.GOOGLE_API_KEY,               
-        env.VITE_GOOGLE_API_KEY_2,        
-        env.VITE_GOOGLE_API_KEY_3,
-        (typeof process !== 'undefined' ? process.env?.API_KEY : '')
-    ];
+    try {
+        // Safely retrieve API Key for browser environments
+        const env = (import.meta as any).env || {};
+        
+        // We check multiple variable names
+        const potentialVars = [
+            env.VITE_GOOGLE_API_KEY,          
+            env.GOOGLE_API_KEY,               
+            env.VITE_GOOGLE_API_KEY_2,        
+            env.VITE_GOOGLE_API_KEY_3,
+            (typeof process !== 'undefined' ? process.env?.API_KEY : '')
+        ];
 
-    const collectedKeys: string[] = [];
-    potentialVars.forEach(val => {
-        if (val && typeof val === 'string') {
-            const keys = val.split(',').map(k => k.trim()).filter(k => k.length > 0);
-            collectedKeys.push(...keys);
-        }
-    });
+        const collectedKeys: string[] = [];
+        potentialVars.forEach(val => {
+            if (val && typeof val === 'string') {
+                const keys = val.split(',').map(k => k.trim()).filter(k => k.length > 0);
+                collectedKeys.push(...keys);
+            }
+        });
 
-    this.apiKeys = [...new Set(collectedKeys)];
+        this.apiKeys = [...new Set(collectedKeys)];
+    } catch (e) {
+        console.error("Failed to initialize API keys", e);
+        this.apiKeys = [];
+    }
   }
 
   // --- API CONNECTION LOGIC ---
@@ -38,12 +43,11 @@ export class AiAgentService {
   ): Promise<any> {
       
       if (this.apiKeys.length === 0) {
-          throw new Error("No API Keys configured.");
+          throw new Error("No API Keys configured. Please check your .env file.");
       }
 
-      // Priority: Gemini 3 (Best for Search) -> 1.5 Flash (Stable Backup) -> 2.0
-      // We prioritize gemini-3-flash-preview as requested for Search Grounding
-      const modelHierarchy = ['gemini-3-flash-preview', 'gemini-1.5-flash', 'gemini-2.0-flash'];
+      // Priority: Gemini 3 (Best for Search) -> 2.0 -> 1.5 Flash (Backup)
+      const modelHierarchy = ['gemini-3-flash-preview', 'gemini-2.0-flash', 'gemini-1.5-flash'];
       
       // If a specific model was requested in baseParams, try to honor it first
       const requestedModel = baseParams.model;
@@ -52,29 +56,50 @@ export class AiAgentService {
       }
 
       for (const model of modelHierarchy) {
+          // Prepare params for this specific model attempt
+          const currentParams = JSON.parse(JSON.stringify(baseParams));
+
+          // CRITICAL FIX: Gemini 1.5 Flash via standard API may not support 'googleSearch' tool.
+          // If we fallback to it, we must strip the tool to prevent a 400 Bad Request.
+          if (model.includes('1.5') && currentParams.config?.tools) {
+             logCallback(`ℹ️ Fallback to ${model}: Disabling Search Tool for compatibility.`);
+             delete currentParams.config.tools;
+             // We also can't enforce a Google Search specific schema if we don't search, 
+             // but 'application/json' mime type is supported by 1.5 Flash.
+          }
+
           for (let i = 0; i < this.apiKeys.length; i++) {
               const apiKey = this.apiKeys[i];
               try {
                   const ai = new GoogleGenAI({ apiKey });
+                  // Explicitly use the model from the loop
                   return await ai.models.generateContent({ 
-                      ...baseParams, 
+                      ...currentParams, 
                       model: model 
                   });
               } catch (error: any) {
                   const msg = error.message || JSON.stringify(error);
                   const isRateLimit = msg.includes('429') || msg.includes('RESOURCE_EXHAUSTED') || msg.includes('503');
+                  const isAuthError = msg.includes('403') || msg.includes('API_KEY_INVALID');
                   
+                  if (isAuthError) {
+                      logCallback(`⚠️ Auth Error on Key ${i+1}. Checking next key...`);
+                      continue; 
+                  }
+
                   if (isRateLimit) {
                       logCallback(`⚠️ ${model} Busy (Key ${i+1}). Switching...`);
                       await new Promise(r => setTimeout(r, 1000)); // Backoff
                       continue;
                   }
-                  console.error(`Error on ${model}:`, error);
+                  
+                  // Log other errors but try next model
+                  console.warn(`Error on ${model} (Key ${i+1}):`, msg);
               }
           }
           logCallback(`📉 ${model} exhausted. Trying backup model...`);
       }
-      throw new Error("All AI models/keys exhausted.");
+      throw new Error("All AI models/keys exhausted or failed.");
   }
 
   // --- SYNTHETIC DATA GENERATOR (FALLBACK) ---
@@ -159,8 +184,8 @@ export class AiAgentService {
           Task: Act as the "NXF Curator".
           Target URL: "${url}"
           
-          Goal: Use Google Search to find details about the specific opportunity or festival located at this URL. 
-          Extract the following fields into a single JSON Object inside an Array:
+          Goal: Analyze the content from the URL (if accessible) or infer details based on the URL structure.
+          Extract or Generate the following fields into a single JSON Object inside an Array:
           [{
             "title": "Exact Title",
             "organizer": "Organizer Name",
@@ -214,10 +239,14 @@ export class AiAgentService {
         if (!Array.isArray(parsedData)) {
             parsedData = [parsedData];
         }
+        // Handle empty array case
+        if (parsedData.length === 0) {
+            throw new Error("AI returned empty dataset");
+        }
 
         return parsedData.map((item: any, index: number) => {
             let deadlineDate = new Date(item.deadline);
-            if (isNaN(deadlineDate.getTime())) {
+            if (!item.deadline || isNaN(deadlineDate.getTime())) {
                 deadlineDate = new Date();
                 deadlineDate.setDate(deadlineDate.getDate() + 30);
             }
@@ -346,11 +375,13 @@ export class AiAgentService {
       const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
       const verifiedSources: string[] = [];
       
-      groundingChunks.forEach((chunk: any) => {
-          if (chunk.web?.uri) {
-              verifiedSources.push(chunk.web.uri);
-          }
-      });
+      if (groundingChunks) {
+          groundingChunks.forEach((chunk: any) => {
+              if (chunk.web?.uri) {
+                  verifiedSources.push(chunk.web.uri);
+              }
+          });
+      }
       const uniqueSources = Array.from(new Set(verifiedSources));
       logCallback(`✅ Verified Sources Found: ${uniqueSources.length}`);
 
@@ -367,10 +398,12 @@ export class AiAgentService {
             throw new Error("Failed to parse JSON response");
         }
       }
+
+      if (!Array.isArray(parsedData)) parsedData = [parsedData];
       
       return parsedData.map((item: any, index: number) => {
          let deadlineDate = new Date(item.deadline);
-         if (isNaN(deadlineDate.getTime())) {
+         if (!item.deadline || isNaN(deadlineDate.getTime())) {
              deadlineDate = new Date();
              deadlineDate.setDate(deadlineDate.getDate() + 45); // Default 45 days
          }
@@ -385,7 +418,7 @@ export class AiAgentService {
 
          return {
             id: `ai-${Date.now()}-${index}`,
-            title: item.title,
+            title: item.title || "Untitled Opportunity",
             deadline: deadlineDate.toLocaleDateString("en-US", { month: 'long', day: 'numeric', year: 'numeric' }),
             deadlineDate: deadlineDate.toISOString().split('T')[0],
             daysLeft: diffTime,
