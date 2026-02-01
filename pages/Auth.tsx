@@ -2,7 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useSearchParams, Link, useNavigate } from 'react-router-dom';
 import Button from '../components/Button';
 import { supabase } from '../services/supabase';
-import { AlertCircle, CheckCircle } from 'lucide-react';
+import { AlertCircle, CheckCircle, Info } from 'lucide-react';
 
 const Auth: React.FC = () => {
   const [searchParams] = useSearchParams();
@@ -29,7 +29,7 @@ const Auth: React.FC = () => {
       }
     });
 
-    // Check for errors in the URL hash
+    // Check for errors in the URL hash (from email links)
     const hash = window.location.hash;
     if (hash && hash.includes('error=')) {
       const params = new URLSearchParams(hash.substring(1));
@@ -65,14 +65,21 @@ const Auth: React.FC = () => {
         
         if (error) throw error;
 
-        // IMMEDIATE LOGIN CHECK:
-        // If "Confirm email" is disabled in Supabase, data.session will be present.
-        // We can redirect immediately.
+        // CRITICAL CHECK:
+        // If "Confirm email" is disabled in Supabase, data.session is present -> Log them in.
+        // If "Confirm email" is enabled in Supabase, data.session is null -> Show message.
         if (data.session) {
           navigate('/');
+        } else if (data.user) {
+          // User was created in Supabase Auth, but session is null.
+          // This strictly means Email Confirmation is ENABLED in the dashboard.
+          setSuccessMsg(
+            "Account created! However, Supabase requires email verification. " +
+            "To skip this and login immediately, go to your Supabase Dashboard > Authentication > Providers > Email and disable 'Confirm email'."
+          );
         } else {
-          // If no session, the server requires email confirmation.
-          setSuccessMsg("Registration successful! Please check your email to verify your account.");
+           // Fallback
+           setSuccessMsg("Registration signal sent. Please check your email.");
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({
@@ -83,6 +90,7 @@ const Auth: React.FC = () => {
         navigate('/'); // Redirect to home on success
       }
     } catch (err: any) {
+      console.error("Auth error:", err);
       setError(err.message || "An unexpected error occurred.");
     } finally {
       setLoading(false);
@@ -110,9 +118,9 @@ const Auth: React.FC = () => {
           )}
 
           {successMsg && (
-            <div className="mb-4 bg-green-50 text-green-700 p-3 rounded-md text-sm flex items-start">
-              <CheckCircle size={16} className="mt-0.5 mr-2 flex-shrink-0" />
-              {successMsg}
+            <div className="mb-4 bg-yellow-50 text-yellow-800 p-3 rounded-md text-sm flex items-start border border-yellow-200">
+              <Info size={16} className="mt-0.5 mr-2 flex-shrink-0" />
+              <span>{successMsg}</span>
             </div>
           )}
 
