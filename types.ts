@@ -1,4 +1,5 @@
 
+
 export interface Opportunity {
   id: string;
   title: string;
@@ -23,7 +24,7 @@ export interface Opportunity {
   };
   
   // Verification & Trust
-  verificationStatus: 'verified' | 'organizer_verified'; // To show trust level
+  verificationStatus: 'verified' | 'organizer_verified' | 'draft'; // To show trust level
   sourceUrl?: string; // Where the crawler found this
   createdAt?: string;
   groundingSources?: string[]; // Array of URLs from Google Search Grounding

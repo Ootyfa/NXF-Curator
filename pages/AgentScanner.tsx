@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Terminal, Play, Cpu, Loader, CheckCircle, ExternalLink, Sparkles, Plus, XCircle, Inbox, RefreshCw, Mail, MousePointer, Target, BarChart2, TrendingUp, Users, Trash2, Lock, Key, ShieldAlert } from 'lucide-react';
+import { Terminal, Play, Cpu, Loader, CheckCircle, ExternalLink, Sparkles, Plus, XCircle, Inbox, RefreshCw, Mail, MousePointer, Target, BarChart2, TrendingUp, Users, Trash2, Lock, Key, ShieldAlert, Link as LinkIcon, Plug } from 'lucide-react';
 import { aiAgentService, SearchDomain } from '../services/AiAgentService';
 import { opportunityService } from '../services/OpportunityService';
 import { emailService } from '../services/EmailService';
@@ -25,6 +25,7 @@ const AgentScanner: React.FC = () => {
   
   // Mission State
   const [selectedDomain, setSelectedDomain] = useState<SearchDomain>('Surprise Me');
+  const [targetUrl, setTargetUrl] = useState('');
 
   // Check session on mount
   useEffect(() => {
@@ -89,6 +90,29 @@ const AgentScanner: React.FC = () => {
     } finally {
       setIsScanning(false);
     }
+  };
+
+  const handleUrlScan = async () => {
+      if(!targetUrl) {
+          alert("Please enter a URL first.");
+          return;
+      }
+      setActiveTab('terminal');
+      setIsScanning(true);
+      addLog(`Analyzing Direct Link: ${targetUrl}`);
+
+      try {
+        const newOpps = await aiAgentService.analyzeSpecificUrl(addLog, targetUrl);
+        const addedCount = await opportunityService.addToInbox(newOpps);
+        addLog(`Analysis Complete. Draft created in Inbox.`);
+        setRefreshTrigger(prev => prev + 1);
+        setTargetUrl(''); // Clear input
+        setTimeout(() => setActiveTab('inbox'), 1500);
+      } catch (e) {
+          addLog("Error analyzing URL.");
+      } finally {
+          setIsScanning(false);
+      }
   };
 
   const handleApprove = async (id: string) => {
@@ -223,7 +247,7 @@ const AgentScanner: React.FC = () => {
       <div className="max-w-6xl mx-auto px-4 py-8 sm:px-6">
         
         {/* Header */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 border-b border-gray-700 pb-6 gap-4">
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between mb-8 border-b border-gray-700 pb-6 gap-6">
           <div className="flex items-center space-x-3">
             <div className="bg-gradient-to-br from-primary to-orange-500 p-2.5 rounded-lg shadow-lg">
               <Cpu className="text-white h-7 w-7" />
@@ -234,16 +258,16 @@ const AgentScanner: React.FC = () => {
             </div>
           </div>
           
-          <div className="flex flex-col md:flex-row items-end md:items-center gap-3">
+          <div className="flex flex-col md:flex-row items-stretch md:items-center gap-4 w-full xl:w-auto">
              
-             {/* Mission Control Selector */}
-             <div className="flex items-center bg-gray-800 rounded-md border border-gray-600 px-3 py-1.5">
+             {/* 1. AUTO SCANNER */}
+             <div className="flex items-center bg-gray-800 rounded-md border border-gray-600 px-3 py-1.5 flex-shrink-0">
                 <Target size={16} className="text-primary mr-2" />
-                <span className="text-xs text-gray-400 mr-2 uppercase font-bold">Mission:</span>
+                <span className="text-xs text-gray-400 mr-2 uppercase font-bold hidden sm:inline">Mission:</span>
                 <select 
                     value={selectedDomain}
                     onChange={(e) => setSelectedDomain(e.target.value as SearchDomain)}
-                    className="bg-transparent text-white text-sm font-medium focus:outline-none cursor-pointer"
+                    className="bg-transparent text-white text-sm font-medium focus:outline-none cursor-pointer w-28 sm:w-auto"
                     disabled={isScanning}
                 >
                     <option value="Surprise Me">🎲 Surprise Me</option>
@@ -253,32 +277,54 @@ const AgentScanner: React.FC = () => {
                     <option value="Literature">📚 Literature</option>
                     <option value="Performing Arts">🎭 Performing Arts</option>
                 </select>
+                <button 
+                  onClick={handleScan}
+                  disabled={isScanning}
+                  className="ml-3 text-primary hover:text-white disabled:opacity-50"
+                  title="Run Auto Scan"
+                >
+                    <Play size={18} fill="currentColor" />
+                </button>
              </div>
 
-             <button 
-               onClick={handleScan}
-               disabled={isScanning}
-               className={`flex items-center px-4 py-2 rounded-md font-bold text-sm transition-all shadow-md ${isScanning ? 'bg-gray-800 text-gray-500 cursor-not-allowed' : 'bg-primary text-gray-900 hover:bg-yellow-400 hover:shadow-primary/50'}`}
-             >
-                {isScanning ? <Loader size={16} className="animate-spin mr-2" /> : <Play size={16} className="mr-2" />}
-                {isScanning ? 'RUNNING...' : 'START AGENT'}
-             </button>
+             {/* 2. URL ANALYZER (NEW) */}
+             <div className="flex items-center bg-gray-800 rounded-md border border-gray-600 px-3 py-1.5 flex-grow max-w-md">
+                <LinkIcon size={16} className="text-blue-400 mr-2 flex-shrink-0" />
+                <input 
+                    type="text" 
+                    placeholder="Or paste URL to analyze..." 
+                    value={targetUrl}
+                    onChange={(e) => setTargetUrl(e.target.value)}
+                    className="bg-transparent text-white text-sm w-full focus:outline-none placeholder-gray-500"
+                    disabled={isScanning}
+                />
+                <button 
+                    onClick={handleUrlScan}
+                    disabled={isScanning || !targetUrl}
+                    className="ml-2 text-blue-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                    title="Analyze Link"
+                >
+                    {isScanning ? <Loader size={16} className="animate-spin" /> : <Plug size={18} />}
+                </button>
+             </div>
              
-             <div className="h-8 w-px bg-gray-700 mx-1 hidden md:block"></div>
+             <div className="h-8 w-px bg-gray-700 mx-1 hidden xl:block"></div>
              
-             <button 
-                onClick={() => {
-                   sessionStorage.removeItem('nxf_agent_token');
-                   setIsAgentAuthenticated(false);
-                }}
-                className="text-xs text-red-400 hover:text-red-300 border border-red-900/50 bg-red-900/10 px-3 py-2 rounded hover:bg-red-900/20 transition-colors"
-             >
-                LOGOUT
-             </button>
+             <div className="flex items-center gap-2">
+                 <button 
+                    onClick={() => {
+                       sessionStorage.removeItem('nxf_agent_token');
+                       setIsAgentAuthenticated(false);
+                    }}
+                    className="text-xs text-red-400 hover:text-red-300 border border-red-900/50 bg-red-900/10 px-3 py-2 rounded hover:bg-red-900/20 transition-colors whitespace-nowrap"
+                 >
+                    LOGOUT
+                 </button>
 
-             <Link to="/" className="text-sm text-gray-400 hover:text-white px-3 py-2 border border-gray-700 rounded-md transition-colors">
-                Public View
-             </Link>
+                 <Link to="/" className="text-sm text-gray-400 hover:text-white px-3 py-2 border border-gray-700 rounded-md transition-colors whitespace-nowrap">
+                    Public View
+                 </Link>
+             </div>
           </div>
         </div>
 
@@ -381,8 +427,8 @@ const AgentScanner: React.FC = () => {
                     <div className="text-center py-20 bg-gray-800/50 rounded-xl border border-dashed border-gray-700">
                         <Inbox size={48} className="mx-auto text-gray-600 mb-4" />
                         <h3 className="text-xl font-bold text-gray-400">Inbox is Empty</h3>
-                        <p className="text-gray-500 mb-6">Select a mission above and start the agent.</p>
-                        <button onClick={handleScan} className="text-primary hover:underline font-medium">Run Scan Now</button>
+                        <p className="text-gray-500 mb-6">Run a scan or paste a URL to find opportunities.</p>
+                        <button onClick={handleScan} className="text-primary hover:underline font-medium">Run Auto Scan</button>
                     </div>
                 ) : (
                     <>

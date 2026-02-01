@@ -209,14 +209,40 @@ const OpportunityDetail: React.FC = () => {
                 </div>
             </div>
 
-            {/* AI Transparency */}
+            {/* AI & Grounding Transparency */}
             {opportunity.aiMetadata && (
-                <div className="mt-8 bg-surface p-4 rounded-md border border-border text-sm">
-                    <h4 className="font-semibold text-secondary flex items-center mb-2">
+                <div className="mt-8 bg-surface p-5 rounded-md border border-border text-sm">
+                    <h4 className="font-semibold text-secondary flex items-center mb-3">
                         <Bot size={16} className="mr-2 text-primary" /> Discovery Source
                     </h4>
-                    <p className="text-text mb-1">Found via <strong>{opportunity.aiMetadata.model}</strong> using query: <em className="text-text-light">"{opportunity.aiMetadata.discoveryQuery}"</em></p>
-                    <p className="text-text-light text-xs">Discovered on {new Date(opportunity.aiMetadata.discoveryDate).toLocaleDateString()}</p>
+                    
+                    <p className="text-text mb-3">
+                        Found via <strong>{opportunity.aiMetadata.model}</strong> using query: 
+                        <em className="text-text-light block mt-1">"{opportunity.aiMetadata.discoveryQuery}"</em>
+                    </p>
+
+                    {/* NEW: GOOGLE SEARCH GROUNDING LINKS */}
+                    {opportunity.groundingSources && opportunity.groundingSources.length > 0 && (
+                        <div className="mt-4 pt-3 border-t border-border">
+                            <span className="flex items-center text-xs font-bold text-secondary uppercase tracking-wide mb-2">
+                                <Globe size={12} className="mr-1 text-blue-500" /> Verified Sources (Google Search)
+                            </span>
+                            <ul className="space-y-1">
+                                {opportunity.groundingSources.slice(0, 5).map((url, i) => (
+                                    <li key={i}>
+                                        <a href={url} target="_blank" rel="noopener noreferrer" className="flex items-center text-blue-600 hover:underline hover:text-blue-800 text-xs truncate">
+                                            <ExternalLink size={10} className="mr-2 flex-shrink-0" />
+                                            {url}
+                                        </a>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                    
+                    <p className="text-text-light text-xs mt-3 pt-2 border-t border-dashed border-gray-200">
+                        Discovered on {new Date(opportunity.aiMetadata.discoveryDate).toLocaleDateString()}
+                    </p>
                 </div>
             )}
         </div>
