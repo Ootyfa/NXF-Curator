@@ -41,6 +41,12 @@ export class AiAgentService {
 
     logCallback(`Initializing Gemini 3 Curator Agent...`);
     
+    // DEBUG: Log masked key to help user verify changes
+    const maskedKey = this.apiKey.length > 8 
+        ? `${this.apiKey.substring(0, 4)}...${this.apiKey.substring(this.apiKey.length - 4)}`
+        : 'Invalid Key Format';
+    logCallback(`🔑 Active Credentials: ${maskedKey}`);
+    
     // Use REAL TIME Context so Google Search results (which are current) are not filtered out
     const TODAY_DATE = new Date();
     const TODAY_STR = TODAY_DATE.toLocaleDateString("en-US", { year: 'numeric', month: 'long', day: 'numeric' });
@@ -201,8 +207,8 @@ export class AiAgentService {
     } catch (error: any) {
       if (error.message?.includes('429') || error.message?.includes('RESOURCE_EXHAUSTED')) {
          logCallback(`❌ ERROR: Quota Exceeded (429).`);
-         logCallback(`Tip: You are on the Free Tier or have hit the daily limit.`);
-         logCallback(`Wait a minute before trying again.`);
+         logCallback(`👉 Check your Google AI Studio dashboard billing.`);
+         logCallback(`👉 Update VITE_GOOGLE_API_KEY in .env if you have a new key.`);
       } else {
          logCallback(`❌ ERROR: ${error.message || error}`);
       }
