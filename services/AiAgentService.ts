@@ -16,6 +16,22 @@ export class AiAgentService {
     this.ai = new GoogleGenAI({ apiKey });
   }
 
+  // Wrapper for API calls with retry logic
+  private async callWithRetry(fn: () => Promise<any>, logCallback: (msg: string) => void, retries = 3, delay = 2000): Promise<any> {
+    try {
+      return await fn();
+    } catch (error: any) {
+      const isRateLimit = error.message?.includes('429') || error.message?.includes('RESOURCE_EXHAUSTED') || error.status === 429;
+      
+      if (retries > 0 && isRateLimit) {
+        logCallback(`⚠️ Rate Limit Hit. Cooling down for ${delay/1000}s... (Attempts left: ${retries})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return this.callWithRetry(fn, logCallback, retries - 1, delay * 2); // Exponential backoff
+      }
+      throw error;
+    }
+  }
+
   async scanWeb(logCallback: (msg: string) => void, domain: SearchDomain = 'Surprise Me'): Promise<Opportunity[]> {
     if (!this.apiKey) {
         logCallback("⛔ CRITICAL ERROR: API Key Missing.");
@@ -95,14 +111,18 @@ export class AiAgentService {
         ]
       `;
 
-      const response = await this.ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: prompt,
-        config: {
-          tools: [{ googleSearch: {} }],
-          responseMimeType: 'application/json'
-        }
-      });
+      // API Call with Retry Logic
+      const response = await this.callWithRetry(
+        () => this.ai.models.generateContent({
+          model: 'gemini-3-flash-preview',
+          contents: prompt,
+          config: {
+            tools: [{ googleSearch: {} }],
+            responseMimeType: 'application/json'
+          }
+        }),
+        logCallback
+      );
 
       logCallback("Intelligence Received. Parsing...");
 
@@ -179,7 +199,13 @@ export class AiAgentService {
       return valid;
 
     } catch (error: any) {
-      logCallback(`❌ ERROR: ${error.message || error}`);
+      if (error.message?.includes('429') || error.message?.includes('RESOURCE_EXHAUSTED')) {
+         logCallback(`❌ ERROR: Quota Exceeded (429).`);
+         logCallback(`Tip: You are on the Free Tier or have hit the daily limit.`);
+         logCallback(`Wait a minute before trying again.`);
+      } else {
+         logCallback(`❌ ERROR: ${error.message || error}`);
+      }
       console.error("AI Agent Error:", error);
       return [];
     }
