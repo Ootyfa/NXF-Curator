@@ -21,7 +21,29 @@ const Auth: React.FC = () => {
     setMode(searchParams.get('mode') === 'register' ? 'register' : 'login');
     setError(null);
     setSuccessMsg(null);
-  }, [searchParams]);
+
+    // Handle Supabase Auth Redirects (e.g. Confirm Email click)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN' || event === 'USER_UPDATED') {
+        navigate('/');
+      }
+    });
+
+    // Check for errors in the URL hash (returned by Supabase on failed redirects)
+    const hash = window.location.hash;
+    if (hash && hash.includes('error=')) {
+      const params = new URLSearchParams(hash.substring(1));
+      const errDesc = params.get('error_description');
+      const errCode = params.get('error_code');
+      if (errDesc) {
+        setError(decodeURIComponent(errDesc.replace(/\+/g, ' ')));
+      } else if (errCode) {
+         setError(`Authentication error: ${errCode}`);
+      }
+    }
+
+    return () => subscription.unsubscribe();
+  }, [searchParams, navigate]);
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,6 +60,8 @@ const Auth: React.FC = () => {
             data: {
               name: fullName,
             },
+            // Explicitly set the redirect URL to your Netlify app URL if needed
+            // emailRedirectTo: 'https://your-app-name.netlify.app/auth' 
           },
         });
         if (error) throw error;
@@ -71,9 +95,9 @@ const Auth: React.FC = () => {
         <div className="p-8">
           
           {error && (
-            <div className="mb-4 bg-red-50 text-red-600 p-3 rounded-md text-sm flex items-start">
+            <div className="mb-4 bg-red-50 text-red-600 p-3 rounded-md text-sm flex items-start break-words">
               <AlertCircle size={16} className="mt-0.5 mr-2 flex-shrink-0" />
-              {error}
+              <span>{error}</span>
             </div>
           )}
 
