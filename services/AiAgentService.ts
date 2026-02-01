@@ -34,9 +34,9 @@ export class AiAgentService {
     this.apiKeys = [...new Set(collectedKeys)];
   }
 
-  // Robust Executor: Handles Key Rotation & Exponential Backoff
+  // Robust Executor: Handles Key Rotation & Exponential Backoff & Model Fallback
   private async executeGenerativeRequest(
-    params: { model: string, contents: any, config: any },
+    baseParams: { model: string, contents: any, config: any },
     logCallback: (msg: string) => void
   ): Promise<any> {
       
@@ -48,6 +48,11 @@ export class AiAgentService {
       const maxRetries = 3; // Total backoff cycles
       let currentKeyIndex = 0; // Start with the first key
       
+      // Fallback Strategy
+      const primaryModel = 'gemini-3-flash-preview';
+      const fallbackModel = 'gemini-2.0-flash-exp';
+      let currentModel = baseParams.model;
+
       // We will loop until we succeed or run out of retry attempts
       while (attempt <= maxRetries) {
           try {
@@ -56,11 +61,19 @@ export class AiAgentService {
               const ai = new GoogleGenAI({ apiKey });
               
               // 2. Execute Request
-              return await ai.models.generateContent(params);
+              // logCallback(`Attempting with Key #${currentKeyIndex + 1} using ${currentModel}...`);
+              return await ai.models.generateContent({
+                  ...baseParams,
+                  model: currentModel
+              });
 
           } catch (error: any) {
-              const isRateLimit = error.message?.includes('429') || error.message?.includes('RESOURCE_EXHAUSTED') || error.status === 429;
+              const errorMsg = error.message || JSON.stringify(error);
+              const isRateLimit = errorMsg.includes('429') || errorMsg.includes('RESOURCE_EXHAUSTED') || error.status === 429;
               
+              // DETAILED LOGGING FOR DEBUGGING
+              console.error(`API Error (Key ${currentKeyIndex + 1}, Model ${currentModel}):`, error);
+
               if (isRateLimit) {
                   logCallback(`⚠️ Quota hit on Key ${currentKeyIndex + 1}/${this.apiKeys.length}.`);
                   
@@ -69,7 +82,6 @@ export class AiAgentService {
                       const nextIndex = (currentKeyIndex + 1) % this.apiKeys.length;
                       
                       // If we haven't looped back to the start yet in this "rotation", switch key
-                      // We track "rotations" by checking if nextIndex < currentKeyIndex (loop around)
                       if (nextIndex > currentKeyIndex) {
                           currentKeyIndex = nextIndex;
                           logCallback(`🔄 Switching to Key ${currentKeyIndex + 1}...`);
@@ -77,10 +89,19 @@ export class AiAgentService {
                       }
                   }
                   
-                  // B. Backoff: If we ran out of keys (or only have 1), we must wait.
+                  // B. Model Fallback: If we tried all keys on Primary Model and failed, try Fallback Model
+                  if (currentModel === primaryModel && attempt === 0) {
+                       logCallback(`⚠️ Primary model overloaded. Switching to fallback: ${fallbackModel}...`);
+                       currentModel = fallbackModel;
+                       currentKeyIndex = 0; // Reset to first key for the new model
+                       attempt++; // Count this as an attempt
+                       continue;
+                  }
+
+                  // C. Backoff: If we ran out of keys (or only have 1), we must wait.
                   if (attempt < maxRetries) {
                       const delay = 2000 * Math.pow(2, attempt); // 2s, 4s, 8s
-                      logCallback(`⏳ All keys exhausted. Cooling down for ${delay/1000}s...`);
+                      logCallback(`⏳ Cooling down for ${delay/1000}s...`);
                       await new Promise(resolve => setTimeout(resolve, delay));
                       
                       attempt++;
@@ -88,9 +109,19 @@ export class AiAgentService {
                       currentKeyIndex = (currentKeyIndex + 1) % this.apiKeys.length;
                       continue;
                   }
+              } else {
+                  // If it's NOT a rate limit (e.g. 400 Bad Request, 403 Permission Denied)
+                  logCallback(`❌ API Error: ${errorMsg.substring(0, 100)}...`);
+                  
+                  if (errorMsg.includes('API key not valid')) {
+                       logCallback(`👉 Key #${currentKeyIndex + 1} is invalid.`);
+                  }
+                  if (errorMsg.includes('has not enabled Gemini')) {
+                       logCallback(`👉 Enable "Generative Language API" in Google Cloud Console.`);
+                  }
               }
 
-              // If it's not a rate limit, or max retries hit, throw the error
+              // Throw if we can't handle it
               throw error;
           }
       }
@@ -103,8 +134,8 @@ export class AiAgentService {
         return [];
     }
 
-    logCallback(`Initializing Gemini 3 Curator Agent...`);
-    logCallback(`🔑 Loaded ${this.apiKeys.length} API Key(s) for rotation.`);
+    logCallback(`Initializing Gemini Curator Agent...`);
+    logCallback(`🔑 Loaded ${this.apiKeys.length} API Key(s).`);
     
     // Use REAL TIME Context
     const TODAY_DATE = new Date();
@@ -179,7 +210,7 @@ export class AiAgentService {
       // EXECUTE WITH FAILOVER LOGIC
       const response = await this.executeGenerativeRequest(
         {
-          model: 'gemini-3-flash-preview',
+          model: 'gemini-3-flash-preview', // Will fallback to 2.0-flash-exp if this fails
           contents: prompt,
           config: {
             tools: [{ googleSearch: {} }],
