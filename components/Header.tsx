@@ -1,12 +1,34 @@
-import React, { useState } from 'react';
-import { Link, useLocation } from 'react-router-dom';
-import { Menu, X } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
+import { Menu, X, User, LogOut } from 'lucide-react';
+import { supabase } from '../services/supabase';
 
 const Header: React.FC = () => {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [user, setUser] = useState<any>(null);
   const location = useLocation();
+  const navigate = useNavigate();
 
-  const isActive = (path: string) => location.pathname === path;
+  useEffect(() => {
+    // Check active session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setUser(session?.user ?? null);
+    });
+
+    // Listen for changes (login/logout)
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    setUser(null);
+    navigate('/');
+    setIsMenuOpen(false);
+  };
   
   return (
     <header className="sticky top-0 z-50 bg-white border-b border-border">
@@ -21,14 +43,32 @@ const Header: React.FC = () => {
 
           {/* Desktop Nav */}
           <nav className="hidden md:flex items-center space-x-6">
-            <Link to="/auth?mode=login" className="text-sm font-medium text-text hover:text-primary transition-colors">
-              Sign In
-            </Link>
-            <Link to="/auth?mode=register">
-              <button className="bg-primary text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-accent-hover transition-colors shadow-sm">
-                Register
-              </button>
-            </Link>
+            {user ? (
+              <>
+                <div className="flex items-center text-sm font-medium text-secondary">
+                  <User size={16} className="mr-2 text-primary" />
+                  <span>{user.user_metadata?.name || user.email}</span>
+                </div>
+                <button 
+                  onClick={handleSignOut}
+                  className="flex items-center text-sm font-medium text-text hover:text-red-500 transition-colors"
+                >
+                  <LogOut size={16} className="mr-1" />
+                  Sign Out
+                </button>
+              </>
+            ) : (
+              <>
+                <Link to="/auth?mode=login" className="text-sm font-medium text-text hover:text-primary transition-colors">
+                  Sign In
+                </Link>
+                <Link to="/auth?mode=register">
+                  <button className="bg-primary text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-accent-hover transition-colors shadow-sm">
+                    Register
+                  </button>
+                </Link>
+              </>
+            )}
           </nav>
 
           {/* Mobile Menu Button */}
@@ -51,20 +91,36 @@ const Header: React.FC = () => {
           />
           <div className="md:hidden bg-white border-t border-border shadow-xl absolute top-full left-0 w-full z-40 animate-slideDown">
             <div className="px-4 py-6 space-y-4 flex flex-col">
-              <Link 
-                to="/auth?mode=login" 
-                onClick={() => setIsMenuOpen(false)}
-                className="block text-base font-medium text-text hover:text-primary"
-              >
-                Sign In
-              </Link>
-              <Link 
-                to="/auth?mode=register" 
-                onClick={() => setIsMenuOpen(false)}
-                className="block w-full text-center bg-primary text-white px-4 py-3 rounded-md font-bold hover:bg-accent-hover"
-              >
-                Register
-              </Link>
+              {user ? (
+                <>
+                  <div className="block text-base font-bold text-secondary border-b border-gray-100 pb-2 mb-2">
+                     Hi, {user.user_metadata?.name || 'Creator'}
+                  </div>
+                  <button 
+                    onClick={handleSignOut}
+                    className="flex items-center text-base font-medium text-red-500 hover:text-red-600"
+                  >
+                    <LogOut size={18} className="mr-2" /> Sign Out
+                  </button>
+                </>
+              ) : (
+                <>
+                  <Link 
+                    to="/auth?mode=login" 
+                    onClick={() => setIsMenuOpen(false)}
+                    className="block text-base font-medium text-text hover:text-primary"
+                  >
+                    Sign In
+                  </Link>
+                  <Link 
+                    to="/auth?mode=register" 
+                    onClick={() => setIsMenuOpen(false)}
+                    className="block w-full text-center bg-primary text-white px-4 py-3 rounded-md font-bold hover:bg-accent-hover"
+                  >
+                    Register
+                  </Link>
+                </>
+              )}
             </div>
           </div>
         </>

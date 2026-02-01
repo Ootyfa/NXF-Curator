@@ -25,11 +25,12 @@ const Auth: React.FC = () => {
     // Handle Supabase Auth Redirects
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'SIGNED_IN') {
+        // Optional: Ensure profile exists in public table here if you add one later
         navigate('/');
       }
     });
 
-    // Check for errors in the URL hash (from email links)
+    // Check for errors in the URL hash
     const hash = window.location.hash;
     if (hash && hash.includes('error=')) {
       const params = new URLSearchParams(hash.substring(1));
@@ -51,6 +52,8 @@ const Auth: React.FC = () => {
     setError(null);
     setSuccessMsg(null);
 
+    console.log("Attempting Auth:", mode, { email, fullName });
+
     try {
       if (mode === 'register') {
         const { data, error } = await supabase.auth.signUp({
@@ -58,27 +61,25 @@ const Auth: React.FC = () => {
           password,
           options: {
             data: {
-              name: fullName,
+              name: fullName, // This goes to auth.users -> raw_user_meta_data
             },
           },
         });
         
         if (error) throw error;
 
-        // CRITICAL CHECK:
-        // If "Confirm email" is disabled in Supabase, data.session is present -> Log them in.
-        // If "Confirm email" is enabled in Supabase, data.session is null -> Show message.
+        console.log("Registration Result:", data);
+
         if (data.session) {
+          // Success: Session active (Email confirm disabled)
           navigate('/');
         } else if (data.user) {
-          // User was created in Supabase Auth, but session is null.
-          // This strictly means Email Confirmation is ENABLED in the dashboard.
+          // Success: User created, waiting for email confirm
           setSuccessMsg(
             "Account created! However, Supabase requires email verification. " +
-            "To skip this and login immediately, go to your Supabase Dashboard > Authentication > Providers > Email and disable 'Confirm email'."
+            "Please check your email, or disable 'Confirm email' in Supabase Dashboard to login immediately."
           );
         } else {
-           // Fallback
            setSuccessMsg("Registration signal sent. Please check your email.");
         }
       } else {
@@ -87,7 +88,7 @@ const Auth: React.FC = () => {
           password,
         });
         if (error) throw error;
-        navigate('/'); // Redirect to home on success
+        navigate('/'); 
       }
     } catch (err: any) {
       console.error("Auth error:", err);
