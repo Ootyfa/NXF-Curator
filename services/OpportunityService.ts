@@ -4,19 +4,69 @@ import { emailService } from './EmailService';
 import { OPPORTUNITIES as MOCK_DATA } from '../constants';
 
 class OpportunityService {
-  private STORAGE_KEY = 'nxf_local_inbox';
+  
+  // --- PUBLIC API ---
+
+  async getAll(): Promise<Opportunity[]> {
+    const { data, error } = await supabase
+      .from('opportunities')
+      .select('*')
+      .neq('status', 'removed_by_organizer')
+      .order('deadline_date', { ascending: true });
+
+    if (error || !data || data.length === 0) {
+      return MOCK_DATA;
+    }
+    return data.map(this.mapFromDb);
+  }
+
+  async getById(id: string): Promise<Opportunity | undefined> {
+    const mock = MOCK_DATA.find(o => o.id === id);
+    if (mock) return mock;
+
+    const { data, error } = await supabase
+      .from('opportunities')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (error || !data) return undefined;
+    return this.mapFromDb(data);
+  }
+
+  // --- MANUAL CURATION API ---
+
+  async createOpportunity(opp: Partial<Opportunity>): Promise<{ success: boolean; id?: string; error?: string }> {
+      const row = this.mapToDb(opp);
+      
+      // Ensure status is published for manual entry
+      row.status = 'published';
+      row.verification_status = 'verified';
+
+      const { data, error } = await supabase
+          .from('opportunities')
+          .insert(row)
+          .select()
+          .single();
+
+      if (error) {
+          console.error("DB Insert Error", error);
+          return { success: false, error: error.message };
+      }
+
+      return { success: true, id: data.id };
+  }
 
   // --- MAPPING HELPERS ---
   private mapFromDb(row: any): Opportunity {
-    // Basic mapping, ensuring robustness against missing fields
     return {
-      id: row.id || `local-${Date.now()}`,
+      id: row.id,
       title: row.title || "Untitled",
       deadline: row.deadline_text || row.deadline || "TBD",
       deadlineDate: row.deadline_date,
-      daysLeft: row.daysLeft || 30,
+      daysLeft: row.daysLeft || 0,
       organizer: row.organizer || "Unknown",
-      grantOrPrize: row.grant_or_prize || row.grantOrPrize || "N/A",
+      grantOrPrize: row.grant_or_prize || "N/A",
       eligibility: row.eligibility || [],
       type: row.type || 'Grant',
       scope: row.scope || 'National',
@@ -26,19 +76,16 @@ class OpportunityService {
       submissionPlatform: row.submission_platform,
       eventDates: row.event_dates,
       requirements: row.requirements || [],
-      contact: row.contact_info || row.contact,
-      verificationStatus: row.verification_status || row.verificationStatus || 'draft',
-      sourceUrl: row.source_url || row.sourceUrl,
-      createdAt: row.created_at || new Date().toISOString(),
-      groundingSources: row.grounding_sources || row.groundingSources,
-      aiConfidenceScore: row.ai_confidence_score || row.aiConfidenceScore,
-      aiReasoning: row.ai_reasoning || row.aiReasoning,
-      aiMetadata: row.ai_metadata || row.aiMetadata,
+      contact: row.contact_info,
+      verificationStatus: row.verification_status || 'draft',
+      sourceUrl: row.source_url,
+      createdAt: row.created_at,
+      groundingSources: row.grounding_sources,
+      aiConfidenceScore: row.ai_confidence_score,
+      aiReasoning: row.ai_reasoning,
+      aiMetadata: row.ai_metadata,
       status: row.status || 'draft',
-      organizerEmailSent: row.organizer_email_sent,
-      lastEditedBy: row.last_edited_by,
       userFeedback: row.user_feedback,
-      organizerActionToken: row.id
     };
   }
 
@@ -66,153 +113,42 @@ class OpportunityService {
       ai_reasoning: opp.aiReasoning,
       ai_metadata: opp.aiMetadata,
       status: opp.status,
-      organizer_email_sent: opp.organizerEmailSent,
-      last_edited_by: opp.lastEditedBy,
-      user_feedback: opp.userFeedback,
     };
   }
+  
+  // Stubs for compatibility & Feedback Logic
+  async getInbox() { return []; }
+  async addToInbox() { return 0; }
+  async approveOpportunity() {}
+  async rejectOpportunity() {}
+  async clearInbox() {}
 
-  // --- PUBLIC API ---
+  async submitDetailedFeedback(id: string, feedback: any) {
+    console.log(`[OpportunityService] Submitting feedback for ${id}`, feedback);
+    // In a real app, we would upsert into a feedback table or increment counters in opportunities
+  }
 
-  async getAll(): Promise<Opportunity[]> {
-    const { data, error } = await supabase
+  async organizerVerify(id: string) {
+    await supabase
       .from('opportunities')
-      .select('*')
-      .neq('status', 'removed_by_organizer')
-      .neq('status', 'draft')
-      .order('deadline_date', { ascending: true });
-
-    if (error || !data || data.length === 0) {
-      return MOCK_DATA;
-    }
-    return data.map(this.mapFromDb);
+      .update({ verification_status: 'organizer_verified' })
+      .eq('id', id);
   }
 
-  async getById(id: string): Promise<Opportunity | undefined> {
-    const mock = MOCK_DATA.find(o => o.id === id);
-    if (mock) return mock;
-
-    const { data, error } = await supabase
+  async organizerRemove(id: string) {
+    await supabase
       .from('opportunities')
-      .select('*')
-      .eq('id', id)
-      .single();
-
-    if (error || !data) return undefined;
-    return this.mapFromDb(data);
+      .update({ status: 'removed_by_organizer' })
+      .eq('id', id);
   }
 
-  // --- AGENT / INBOX WORKFLOW ---
-
-  // Fetches from DB first, then falls back to LocalStorage
-  async getInbox(): Promise<Opportunity[]> {
-    let dbOpportunities: Opportunity[] = [];
-    
-    // 1. Try DB
-    try {
-        const { data } = await supabase
-        .from('opportunities')
-        .select('*')
-        .eq('status', 'draft')
-        .order('created_at', { ascending: false });
-        
-        if (data) dbOpportunities = data.map(this.mapFromDb);
-    } catch (e) { console.warn("DB Fetch failed"); }
-
-    // 2. Fetch Local Storage
-    const localStr = localStorage.getItem(this.STORAGE_KEY);
-    const localOpportunities: Opportunity[] = localStr ? JSON.parse(localStr) : [];
-
-    // Combine
-    return [...localOpportunities, ...dbOpportunities];
-  }
-
-  // Tries DB, falls back to LocalStorage
-  async addToInbox(opportunities: Opportunity[]): Promise<number> {
-    if (opportunities.length === 0) return 0;
-    
-    // 1. Try Supabase
-    const rowsToInsert = opportunities.map(opp => ({
-        ...this.mapToDb(opp),
-        status: 'draft',
-        verification_status: 'draft'
-    }));
-    
-    const { error } = await supabase
-        .from('opportunities')
-        .insert(rowsToInsert);
-
-    if (!error) {
-        return opportunities.length; // Success via DB
-    }
-
-    console.warn("Supabase insert failed, saving to LocalStorage", error);
-
-    // 2. Fallback: Save to LocalStorage
-    const currentLocal = JSON.parse(localStorage.getItem(this.STORAGE_KEY) || "[]");
-    const updatedLocal = [...opportunities, ...currentLocal];
-    localStorage.setItem(this.STORAGE_KEY, JSON.stringify(updatedLocal));
-
-    return opportunities.length;
-  }
-
-  async approveOpportunity(id: string): Promise<void> {
-      // 1. Try Local Storage Remove
-      const localStr = localStorage.getItem(this.STORAGE_KEY);
-      if (localStr) {
-          const localArr: Opportunity[] = JSON.parse(localStr);
-          const item = localArr.find(i => i.id === id);
-          if (item) {
-              // It was a local item, "Publish" it by sending email simulation
-              const remaining = localArr.filter(i => i.id !== id);
-              localStorage.setItem(this.STORAGE_KEY, JSON.stringify(remaining));
-              await emailService.sendSubscriberAlert(item);
-              await emailService.sendOrganizerOutreach(item);
-              return;
-          }
-      }
-
-      // 2. Try DB
-      const { data } = await supabase
+  async organizerUpdate(id: string, data: Partial<Opportunity>) {
+    const dbData = this.mapToDb(data);
+    await supabase
       .from('opportunities')
-      .update({
-        status: 'published',
-        verification_status: 'verified',
-        created_at: new Date().toISOString()
-      })
-      .eq('id', id)
-      .select()
-      .single();
-
-      if (data) {
-        const opp = this.mapFromDb(data);
-        await emailService.sendSubscriberAlert(opp);
-        await emailService.sendOrganizerOutreach(opp);
-      }
+      .update(dbData)
+      .eq('id', id);
   }
-
-  async rejectOpportunity(id: string): Promise<void> {
-    // 1. Local
-    const localStr = localStorage.getItem(this.STORAGE_KEY);
-    if (localStr) {
-         const localArr = JSON.parse(localStr);
-         const remaining = localArr.filter((i: any) => i.id !== id);
-         localStorage.setItem(this.STORAGE_KEY, JSON.stringify(remaining));
-    }
-    // 2. DB
-    await supabase.from('opportunities').update({ status: 'rejected' }).eq('id', id);
-  }
-
-  async clearInbox(): Promise<void> {
-    localStorage.removeItem(this.STORAGE_KEY);
-    await supabase.from('opportunities').delete().eq('status', 'draft');
-  }
-
-  // ... (Keep existing organizer methods) ...
-  async submitDetailedFeedback(id: string, payload: any) { /* implementation irrelevant for inbox fix */ }
-  async organizerVerify(id: string) { return true; }
-  async organizerRemove(id: string) { return true; }
-  async organizerUpdate(id: string, updates: any) { return true; }
 }
 
 export const opportunityService = new OpportunityService();
