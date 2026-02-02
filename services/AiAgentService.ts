@@ -7,7 +7,10 @@ export class AiAgentService {
   private apiKeys: string[] = [];
   private currentKeyIndex = 0;
   private lastRequestTime = 0;
+  private keyLastUsedTime: Map<string, number> = new Map();
+  private keyFailureCount: Map<string, number> = new Map();
   private readonly MIN_REQUEST_INTERVAL = 3000; // 3 seconds mandatory delay between requests
+  private readonly KEY_COOLDOWN_PERIOD = 60000; // 60 seconds cooldown for rate-limited keys
 
   constructor() {
     try {
@@ -27,8 +30,17 @@ export class AiAgentService {
         });
 
         this.apiKeys = [...new Set(collectedKeys)];
+        
+        // Initialize tracking for each key
+        this.apiKeys.forEach(key => {
+            this.keyLastUsedTime.set(key, 0);
+            this.keyFailureCount.set(key, 0);
+        });
+        
         if (this.apiKeys.length > 0) {
-            console.log(`AiAgentService initialized with ${this.apiKeys.length} API keys.`);
+            console.log(`✅ AiAgentService initialized with ${this.apiKeys.length} API key(s): ${this.apiKeys.map(k => '...' + k.slice(-4)).join(', ')}`);
+        } else {
+            console.error('❌ No API keys found! Please check your environment variables.');
         }
     } catch (e) {
         console.error("Failed to load keys", e);
@@ -36,25 +48,63 @@ export class AiAgentService {
   }
 
   // --- THROTTLING HELPER ---
-  // Ensures we never hit the API faster than allowed, regardless of key
   private async enforceRateLimit(logCallback?: (msg: string) => void) {
       const now = Date.now();
       const timeSinceLast = now - this.lastRequestTime;
       
       if (timeSinceLast < this.MIN_REQUEST_INTERVAL) {
           const wait = this.MIN_REQUEST_INTERVAL - timeSinceLast;
-          // if (logCallback) logCallback(`⏳ Throttling: Waiting ${Math.round(wait/100)/10}s...`);
+          if (logCallback) logCallback(`⏳ Throttling: Waiting ${Math.round(wait/100)/10}s...`);
           await new Promise(r => setTimeout(r, wait));
       }
       this.lastRequestTime = Date.now();
   }
 
-  // --- ROUND-ROBIN KEY ROTATION ---
-  private getNextKey(): string {
-      if (this.apiKeys.length === 0) throw new Error("No API Keys configured.");
-      const key = this.apiKeys[this.currentKeyIndex];
-      this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
-      return key;
+  // --- SMART KEY SELECTION ---
+  private getBestAvailableKey(): string | null {
+      if (this.apiKeys.length === 0) return null;
+      
+      const now = Date.now();
+      let bestKey: string | null = null;
+      let oldestUsageTime = Infinity;
+      
+      // Find the key that was used longest ago AND is not in cooldown
+      for (const key of this.apiKeys) {
+          const lastUsed = this.keyLastUsedTime.get(key) || 0;
+          const failures = this.keyFailureCount.get(key) || 0;
+          
+          // Skip keys that are in cooldown period after rate limit
+          if (failures > 0 && (now - lastUsed) < this.KEY_COOLDOWN_PERIOD) {
+              const cooldownRemaining = Math.ceil((this.KEY_COOLDOWN_PERIOD - (now - lastUsed)) / 1000);
+              console.log(`⏭️ Skipping key ...${key.slice(-4)} (cooldown: ${cooldownRemaining}s remaining)`);
+              continue;
+          }
+          
+          // Reset failure count if cooldown period has passed
+          if (failures > 0 && (now - lastUsed) >= this.KEY_COOLDOWN_PERIOD) {
+              this.keyFailureCount.set(key, 0);
+          }
+          
+          // Pick the key that was used longest ago
+          if (lastUsed < oldestUsageTime) {
+              oldestUsageTime = lastUsed;
+              bestKey = key;
+          }
+      }
+      
+      if (bestKey) {
+          this.keyLastUsedTime.set(bestKey, now);
+          console.log(`🔑 Using key ...${bestKey.slice(-4)} (last used: ${now - oldestUsageTime}ms ago)`);
+      }
+      
+      return bestKey;
+  }
+
+  // --- MARK KEY AS FAILED ---
+  private markKeyAsFailed(key: string) {
+      const currentFailures = this.keyFailureCount.get(key) || 0;
+      this.keyFailureCount.set(key, currentFailures + 1);
+      console.log(`❌ Marked key ...${key.slice(-4)} as failed (failures: ${currentFailures + 1})`);
   }
 
   // --- API EXECUTION CORE ---
@@ -67,25 +117,43 @@ export class AiAgentService {
           throw new Error("No API Keys configured. Cannot fetch WWW data.");
       }
 
-      // Updated Model List to avoid 404 errors on v1beta
-      // gemini-2.0-flash-exp is the current stable-ish beta model
-      const models = ['gemini-2.0-flash-exp', 'gemini-2.0-flash']; 
+      // Use stable models that definitely exist
+      const models = [
+          'gemini-1.5-flash-latest',  // Primary - stable, fast
+          'gemini-1.5-pro-latest',    // Fallback - more capable but slower
+      ];
       
-      // Calculate max attempts (allow cycling through keys multiple times)
-      const maxTotalAttempts = Math.max(3, this.apiKeys.length * 2);
+      const maxTotalAttempts = Math.max(5, this.apiKeys.length * 3);
+      let lastError: any = null;
 
       for (let attempt = 1; attempt <= maxTotalAttempts; attempt++) {
-          const apiKey = this.getNextKey();
+          // Get the best available key (not in cooldown)
+          const apiKey = this.getBestAvailableKey();
           
-          // Switch model on retries if the first one fails repeatedly
-          const modelIndex = attempt > this.apiKeys.length ? 1 : 0;
-          const model = models[modelIndex] || models[0];
+          if (!apiKey) {
+              // All keys are in cooldown
+              const waitTime = 10000; // Wait 10 seconds for keys to cool down
+              logCallback(`⏸️ All keys are rate-limited. Waiting ${waitTime/1000}s for cooldown...`);
+              await new Promise(r => setTimeout(r, waitTime));
+              
+              // Reset all cooldowns after waiting
+              this.apiKeys.forEach(key => {
+                  this.keyFailureCount.set(key, 0);
+              });
+              
+              continue; // Try again with reset keys
+          }
+          
+          // Switch to fallback model after half the attempts
+          const modelIndex = attempt > Math.floor(maxTotalAttempts / 2) ? 1 : 0;
+          const model = models[modelIndex];
 
           try {
               // 1. THROTTLE (Critical for avoiding 429 bursts)
               await this.enforceRateLimit(logCallback);
 
               // 2. EXECUTE
+              logCallback(`🚀 Attempt ${attempt}/${maxTotalAttempts} with ${model}...`);
               const ai = new GoogleGenAI({ apiKey });
               
               const result = await ai.models.generateContent({
@@ -98,46 +166,57 @@ export class AiAgentService {
               const isUrlAnalysis = JSON.stringify(params.contents).includes('http');
               
               if (!hasGrounding && !isUrlAnalysis) {
-                  console.warn(`Attempt ${attempt}: ${model} returned no grounding data.`);
-                  if (attempt === maxTotalAttempts) throw new Error("AI returned no search results.");
-                  continue; // Try next key/model
+                  console.warn(`⚠️ Attempt ${attempt}: ${model} returned no grounding data.`);
+                  if (attempt === maxTotalAttempts) {
+                      throw new Error("AI returned no search results after all attempts.");
+                  }
+                  continue; // Try next attempt
               }
 
+              // Success! Reset failure count for this key
+              this.keyFailureCount.set(apiKey, 0);
+              logCallback(`✅ Success with key ...${apiKey.slice(-4)}`);
               return result;
 
           } catch (error: any) {
+              lastError = error;
               const msg = error.message || JSON.stringify(error);
               
-              // Handle 404 Model Not Found specifically
+              // Handle 404 Model Not Found
               if (msg.includes('404') || msg.includes('not found')) {
-                  console.warn(`Model ${model} not found, skipping.`);
-                  // If we are on the primary model, force switch to backup for next loop
-                  // But since we loop, next attempt might pick up backup if logic allows, 
-                  // or we just continue to try next key. 
-                  // In this specific loop logic, let's just log and continue.
+                  console.warn(`⚠️ Model ${model} not found, switching to fallback...`);
                   continue;
               }
 
-              const isRateLimit = msg.includes('429') || msg.includes('503');
+              // Handle Rate Limiting (429 or 503)
+              const isRateLimit = msg.includes('429') || msg.includes('503') || msg.includes('RESOURCE_EXHAUSTED');
               
               if (isRateLimit) {
-                   // If we have multiple keys, we can switch almost immediately.
-                   // If we only have 1 key, we must wait longer.
-                   const isMultiKey = this.apiKeys.length > 1;
-                   const waitTime = isMultiKey ? 1000 : 5000 * Math.pow(1.5, attempt);
+                   logCallback(`⚠️ Rate Limit (429) on Key ...${apiKey.slice(-4)}. Switching to next key...`);
+                   this.markKeyAsFailed(apiKey);
                    
-                   logCallback(`⚠️ Rate Limit (429) on Key ...${apiKey.slice(-4)}. Switching in ${waitTime/1000}s...`);
-                   await new Promise(r => setTimeout(r, waitTime));
-                   continue; // Loop continues, effectively trying next key via getNextKey()
+                   // Don't wait here - just try the next key immediately
+                   // The getBestAvailableKey() function will handle cooldown logic
+                   continue;
               }
               
-              console.warn(`Error on attempt ${attempt} (${model}):`, msg);
+              // Handle Quota Exceeded
+              if (msg.includes('quota') || msg.includes('QUOTA_EXCEEDED')) {
+                  logCallback(`⚠️ Quota exceeded on key ...${apiKey.slice(-4)}`);
+                  this.markKeyAsFailed(apiKey);
+                  continue;
+              }
               
-              // Non-retriable error or out of attempts
-              if (attempt === maxTotalAttempts) throw new Error(`Search failed: ${msg}`);
+              console.warn(`⚠️ Error on attempt ${attempt} (${model}): ${msg}`);
+              
+              // If this is the last attempt, throw the error
+              if (attempt === maxTotalAttempts) {
+                  throw new Error(`Search failed after ${maxTotalAttempts} attempts: ${msg}`);
+              }
           }
       }
-      throw new Error("API Quota Exceeded. All keys rate limited.");
+      
+      throw new Error(`API Quota Exceeded or all keys failed. Last error: ${lastError?.message || 'Unknown error'}`);
   }
 
   // Helper to normalize URLs
@@ -153,10 +232,9 @@ export class AiAgentService {
   async scanWeb(logCallback: (msg: string) => void, domain: SearchDomain): Promise<Opportunity[]> {
     const TODAY_STR = new Date().toLocaleDateString("en-US", { year: 'numeric', month: 'long', day: 'numeric' });
     const CURRENT_YEAR = new Date().getFullYear();
-    const TARGET_YEAR_1 = CURRENT_YEAR + 1; // 2026
-    const TARGET_YEAR_2 = CURRENT_YEAR + 2; // 2027
+    const TARGET_YEAR_1 = CURRENT_YEAR + 1;
+    const TARGET_YEAR_2 = CURRENT_YEAR + 2;
     
-    // Explicit Prompt forcing Search Use with FUTURE dates (2026+)
     const searchStrategy = `"${domain}" artist grants India deadline ${TARGET_YEAR_1} ${TARGET_YEAR_2} open call`;
     logCallback(`🔍 SEARCHING WWW: "${searchStrategy}"...`);
 
@@ -186,7 +264,7 @@ export class AiAgentService {
 
     try {
         const response = await this.executeStrictSearch({
-            model: 'gemini-2.0-flash-exp', // Default to primary model
+            model: 'gemini-1.5-flash-latest',
             contents: prompt,
             config: { 
                 tools: [{ googleSearch: {} }], 
@@ -278,7 +356,7 @@ export class AiAgentService {
                 status: 'draft',
                 createdAt: new Date().toISOString(),
                 aiMetadata: {
-                    model: 'Gemini-2.0-Flash (Future Mode)',
+                    model: 'Gemini-1.5-Flash',
                     discoveryQuery: searchStrategy,
                     discoveryDate: new Date().toISOString()
                 }
@@ -300,7 +378,7 @@ export class AiAgentService {
     
     try {
         const response = await this.executeStrictSearch({
-            model: 'gemini-2.0-flash-exp',
+            model: 'gemini-1.5-flash-latest',
             contents: `Analyze this URL: ${url}. Return JSON: {title, organizer, deadline (YYYY-MM-DD), prize, type, description}.`,
             config: { 
                 tools: [{ googleSearch: {} }], 
@@ -341,7 +419,11 @@ export class AiAgentService {
             createdAt: new Date().toISOString(),
             aiConfidenceScore: 90,
             aiReasoning: "Direct URL Analysis",
-            aiMetadata: { model: 'Gemini-2.0 (URL Mode)', discoveryQuery: url, discoveryDate: new Date().toISOString() }
+            aiMetadata: { 
+                model: 'Gemini-1.5-Flash', 
+                discoveryQuery: url, 
+                discoveryDate: new Date().toISOString() 
+            }
         }];
 
     } catch (error: any) {
