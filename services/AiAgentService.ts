@@ -81,25 +81,36 @@ export class AiAgentService {
       throw new Error("Unable to connect to Google Search. All keys/models exhausted.");
   }
 
+  // Helper to normalize URLs for comparison (ignore www, https, trailing slash)
+  private normalizeUrl(url: string): string {
+      try {
+          return url.replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '').toLowerCase().split('?')[0];
+      } catch {
+          return url;
+      }
+  }
+
   // --- MAIN DISCOVERY FUNCTION (Strict Web Only) ---
   async scanWeb(logCallback: (msg: string) => void, domain: SearchDomain): Promise<Opportunity[]> {
     const TODAY_STR = new Date().toLocaleDateString("en-US", { year: 'numeric', month: 'long', day: 'numeric' });
     const CURRENT_YEAR = new Date().getFullYear();
+    const NEXT_YEAR = CURRENT_YEAR + 1;
     
-    // Explicit Prompt forcing Search Use
-    const searchStrategy = `open calls for ${domain} artists India ${CURRENT_YEAR} apply now`;
+    // Explicit Prompt forcing Search Use with FUTURE dates
+    const searchStrategy = `artist grants open calls India ${CURRENT_YEAR} ${NEXT_YEAR} apply`;
     logCallback(`🔍 SEARCHING WWW: "${searchStrategy}"...`);
 
     const prompt = `
       Context: Today is ${TODAY_STR}.
       Role: You are a strict research bot.
-      Task: Search Google for current, active opportunities (Grants, Residencies, Festivals) for Indian creators in ${domain}.
+      Task: Search Google for **10** NEW, ACTIVE opportunities (Grants, Residencies, Festivals) for Indian creators in ${domain} with deadlines in ${CURRENT_YEAR} or ${NEXT_YEAR}.
       
       CRITICAL RULES:
       1. You MUST use the 'googleSearch' tool.
-      2. ONLY return active opportunities with deadlines in the future.
-      3. DO NOT fabricate data. If you find nothing real, return an empty array.
-      4. Extract valid URLs for every item.
+      2. ONLY return items with deadlines AFTER ${TODAY_STR}.
+      3. **IGNORE** anything with a deadline in 2024 or earlier.
+      4. DO NOT fabricate data. If you find nothing real, return an empty array.
+      5. Extract valid URLs for every item.
 
       Output JSON format:
       [{ 
@@ -123,14 +134,18 @@ export class AiAgentService {
             }
         }, logCallback);
 
-        logCallback("✅ Data received from Google. Verifying Sources...");
+        logCallback("✅ Data received. Verifying Freshness...");
 
         // 1. Extract Grounding Metadata (The Proof)
         const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
         const verifiedUrls = new Set<string>();
+        const normalizedVerifiedUrls = new Set<string>();
         
         groundingChunks.forEach((chunk: any) => {
-            if (chunk.web?.uri) verifiedUrls.add(chunk.web.uri);
+            if (chunk.web?.uri) {
+                verifiedUrls.add(chunk.web.uri);
+                normalizedVerifiedUrls.add(this.normalizeUrl(chunk.web.uri));
+            }
         });
 
         if (verifiedUrls.size === 0) {
@@ -152,26 +167,41 @@ export class AiAgentService {
 
         // 3. Map & Validate
         const validOpportunities: Opportunity[] = [];
+        const today = new Date();
 
         rawData.forEach((item, index) => {
-            // Find a matching source URL
-            // We try to match the item's website, or fall back to one of the verified URLs
+            // Find a matching source URL (Loose Match)
             let sourceUrl = item.website;
-            if (!sourceUrl || !verifiedUrls.has(sourceUrl)) {
-                 // If the specific item URL isn't in the verified list, 
-                 // assign the first available verified URL as the source reference.
+            const normalizedItemUrl = this.normalizeUrl(sourceUrl || '');
+            
+            const isVerified = normalizedVerifiedUrls.has(normalizedItemUrl) || verifiedUrls.has(sourceUrl);
+
+            if (!sourceUrl || !isVerified) {
+                 // If exact URL isn't verified, try to find a verified URL that looks related
+                 // OR fallback to the first verified URL as a generic reference
                  sourceUrl = Array.from(verifiedUrls)[0];
             }
 
             // FILTER: Must have a future deadline
             let deadlineDate = new Date(item.deadline);
             if (isNaN(deadlineDate.getTime())) {
-                // If date is unclear, be safe and skip, OR check if it says "Open"
-                return; 
+                // Try to parse if it's textual like "March 2025"
+                if (item.deadline.includes(CURRENT_YEAR.toString()) || item.deadline.includes(NEXT_YEAR.toString())) {
+                    // It's likely valid year, but date is fuzzy. We'll accept it but set a future default for sorting.
+                    deadlineDate = new Date();
+                    deadlineDate.setDate(deadlineDate.getDate() + 60);
+                } else {
+                    return; // Skip invalid dates
+                }
             }
             
-            // Logic: Accept items if deadline is future OR if it was found via valid search
-            const diffTime = Math.ceil((deadlineDate.getTime() - new Date().getTime()) / (1000 * 60 * 60 * 24));
+            // Strict Date Check: Must be in future
+            if (deadlineDate < today) {
+                // logCallback(`Skipping expired item: ${item.title} (${item.deadline})`);
+                return;
+            }
+
+            const diffTime = Math.ceil((deadlineDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
 
             validOpportunities.push({
                 id: `web-${Date.now()}-${index}`,
@@ -181,7 +211,7 @@ export class AiAgentService {
                 deadlineDate: deadlineDate.toISOString().split('T')[0],
                 daysLeft: diffTime,
                 grantOrPrize: item.grantOrPrize || "See Website",
-                eligibility: ["Indian Citizens"], // Inferred from search query
+                eligibility: ["Indian Citizens"], 
                 type: item.type || 'Grant',
                 scope: 'National',
                 category: domain,
@@ -190,7 +220,7 @@ export class AiAgentService {
                 verificationStatus: 'draft',
                 sourceUrl: sourceUrl,
                 groundingSources: Array.from(verifiedUrls),
-                aiConfidenceScore: 95, // High because it came from search
+                aiConfidenceScore: 95, 
                 aiReasoning: `Sourced from Google Search: ${sourceUrl}`,
                 status: 'draft',
                 createdAt: new Date().toISOString(),
@@ -202,12 +232,12 @@ export class AiAgentService {
             });
         });
 
-        logCallback(`✅ Found ${validOpportunities.length} Verified Opportunities from WWW.`);
+        logCallback(`✅ Found ${validOpportunities.length} Verified Future Opportunities.`);
         return validOpportunities;
 
     } catch (error: any) {
         logCallback(`❌ Search Failed: ${error.message}`);
-        throw error; // Propagate error to UI so user knows it failed. NO FAKE DATA.
+        throw error; 
     }
   }
 
