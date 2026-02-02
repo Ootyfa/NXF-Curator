@@ -29,7 +29,7 @@ export class AiAgentService {
     }
   }
 
-  // --- API EXECUTION WITH RETRY & ROTATION ---
+  // --- API EXECUTION WITH EXPONENTIAL BACKOFF ---
   private async executeStrictSearch(
     params: { model: string, contents: any, config: any },
     logCallback: (msg: string) => void
@@ -39,42 +39,53 @@ export class AiAgentService {
           throw new Error("No API Keys configured. Cannot fetch WWW data.");
       }
 
-      // We only use models that support Grounding (Search) well
-      const models = ['gemini-3-flash-preview', 'gemini-2.0-flash-exp']; 
+      // Gemini 2.0 Flash is generally more stable and faster for high-volume search
+      const models = ['gemini-2.0-flash', 'gemini-1.5-flash']; 
 
       for (const model of models) {
           for (let i = 0; i < this.apiKeys.length; i++) {
               const apiKey = this.apiKeys[i];
-              try {
-                  const ai = new GoogleGenAI({ apiKey });
-                  
-                  // logCallback(`Attempting connection via ${model} (Key ${i+1})...`);
-                  
-                  const result = await ai.models.generateContent({
-                      ...params,
-                      model: model
-                  });
-                  
-                  // Check if search actually happened
-                  if (!result.candidates?.[0]?.groundingMetadata?.groundingChunks) {
-                     // If model didn't search, we consider it a failure for this strict mode
-                     // unless it's a direct URL analysis where the URL is the source
-                     if (!JSON.stringify(params.contents).includes('http')) {
-                        console.warn(`${model} did not perform a search.`);
-                        continue; 
-                     }
-                  }
+              
+              // Retry Logic with Backoff (3 attempts)
+              for (let attempt = 1; attempt <= 3; attempt++) {
+                  try {
+                      const ai = new GoogleGenAI({ apiKey });
+                      
+                      // logCallback(`Attempting ${model} (Key ${i+1}, Try ${attempt})...`);
+                      
+                      const result = await ai.models.generateContent({
+                          ...params,
+                          model: model
+                      });
+                      
+                      // Validation: Did it actually search?
+                      const hasGrounding = !!result.candidates?.[0]?.groundingMetadata?.groundingChunks;
+                      const isUrlAnalysis = JSON.stringify(params.contents).includes('http');
+                      
+                      if (!hasGrounding && !isUrlAnalysis) {
+                          // If it refused to search, treat as soft fail and maybe try next model
+                          if (attempt === 3) console.warn(`${model} skipped search.`);
+                          continue; 
+                      }
 
-                  return result;
+                      return result;
 
-              } catch (error: any) {
-                  const msg = error.message || "";
-                  if (msg.includes('429') || msg.includes('503')) {
-                       logCallback(`⚠️ High Traffic on Key ${i+1}. Pausing 2s...`);
-                       await new Promise(r => setTimeout(r, 2000));
-                       continue;
+                  } catch (error: any) {
+                      const msg = error.message || "";
+                      const isRateLimit = msg.includes('429') || msg.includes('503');
+                      
+                      if (isRateLimit) {
+                           // EXPONENTIAL BACKOFF: 2s -> 4s -> 8s
+                           const waitTime = 2000 * Math.pow(2, attempt - 1);
+                           logCallback(`⚠️ Rate Limit (429) on Key ${i+1}. Cooling down for ${waitTime/1000}s...`);
+                           await new Promise(r => setTimeout(r, waitTime));
+                           continue; // Retry loop
+                      }
+                      
+                      // If it's not a rate limit (e.g. 400 Bad Request), don't retry same key
+                      console.warn(`Error on ${model}:`, msg);
+                      break; // Break retry loop, try next key
                   }
-                  console.warn(`Error on ${model}:`, msg);
               }
           }
       }
@@ -94,24 +105,25 @@ export class AiAgentService {
   async scanWeb(logCallback: (msg: string) => void, domain: SearchDomain): Promise<Opportunity[]> {
     const TODAY_STR = new Date().toLocaleDateString("en-US", { year: 'numeric', month: 'long', day: 'numeric' });
     const CURRENT_YEAR = new Date().getFullYear();
-    const NEXT_YEAR = CURRENT_YEAR + 1;
+    const TARGET_YEAR_1 = CURRENT_YEAR + 1; // 2026
+    const TARGET_YEAR_2 = CURRENT_YEAR + 2; // 2027
     
-    // Explicit Prompt forcing Search Use with FUTURE dates
-    const searchStrategy = `artist grants open calls India ${CURRENT_YEAR} ${NEXT_YEAR} apply`;
+    // Explicit Prompt forcing Search Use with FUTURE dates (2026+)
+    const searchStrategy = `"${domain}" artist grants India deadline ${TARGET_YEAR_1} ${TARGET_YEAR_2} open call`;
     logCallback(`🔍 SEARCHING WWW: "${searchStrategy}"...`);
 
     const prompt = `
       Context: Today is ${TODAY_STR}.
       Role: You are a strict research bot.
-      Task: Search Google for **10** NEW, ACTIVE opportunities (Grants, Residencies, Festivals) for Indian creators in ${domain} with deadlines in ${CURRENT_YEAR} or ${NEXT_YEAR}.
       
-      CRITICAL RULES:
-      1. You MUST use the 'googleSearch' tool.
-      2. ONLY return items with deadlines AFTER ${TODAY_STR}.
-      3. **IGNORE** anything with a deadline in 2024 or earlier.
-      4. DO NOT fabricate data. If you find nothing real, return an empty array.
-      5. Extract valid URLs for every item.
-
+      Task: Use Google Search to find **10** NEW, ACTIVE opportunities for Indian artists in ${domain}.
+      
+      CRITICAL SEARCH INSTRUCTIONS:
+      1. FOCUS specifically on opportunities for **${TARGET_YEAR_1}** and **${TARGET_YEAR_2}**.
+      2. LOOK FOR: "Deadline ${TARGET_YEAR_1}", "Open Call ${TARGET_YEAR_1}", "Residency ${TARGET_YEAR_1}".
+      3. IGNORE past deadlines.
+      4. DO NOT return items that expired in ${CURRENT_YEAR} unless the next cycle is confirmed for ${TARGET_YEAR_1}.
+      
       Output JSON format:
       [{ 
          "title": "Exact Title", 
@@ -126,7 +138,7 @@ export class AiAgentService {
 
     try {
         const response = await this.executeStrictSearch({
-            model: 'gemini-3-flash-preview',
+            model: 'gemini-2.0-flash', // Switched to 2.0 Flash for stability
             contents: prompt,
             config: { 
                 tools: [{ googleSearch: {} }], 
@@ -177,19 +189,19 @@ export class AiAgentService {
             const isVerified = normalizedVerifiedUrls.has(normalizedItemUrl) || verifiedUrls.has(sourceUrl);
 
             if (!sourceUrl || !isVerified) {
-                 // If exact URL isn't verified, try to find a verified URL that looks related
-                 // OR fallback to the first verified URL as a generic reference
-                 sourceUrl = Array.from(verifiedUrls)[0];
+                 sourceUrl = Array.from(verifiedUrls)[0]; // Fallback to first grounded source
             }
 
             // FILTER: Must have a future deadline
             let deadlineDate = new Date(item.deadline);
             if (isNaN(deadlineDate.getTime())) {
-                // Try to parse if it's textual like "March 2025"
-                if (item.deadline.includes(CURRENT_YEAR.toString()) || item.deadline.includes(NEXT_YEAR.toString())) {
-                    // It's likely valid year, but date is fuzzy. We'll accept it but set a future default for sorting.
+                // If text is vague like "Spring 2026", check string content
+                const hasYear = item.deadline.includes(TARGET_YEAR_1.toString()) || item.deadline.includes(TARGET_YEAR_2.toString()) || item.deadline.includes(CURRENT_YEAR.toString());
+                
+                if (hasYear) {
+                    // It's likely valid year, but date is fuzzy. Set a future default.
                     deadlineDate = new Date();
-                    deadlineDate.setDate(deadlineDate.getDate() + 60);
+                    deadlineDate.setFullYear(deadlineDate.getFullYear() + 1); // Push to next year by default for safety
                 } else {
                     return; // Skip invalid dates
                 }
@@ -197,7 +209,6 @@ export class AiAgentService {
             
             // Strict Date Check: Must be in future
             if (deadlineDate < today) {
-                // logCallback(`Skipping expired item: ${item.title} (${item.deadline})`);
                 return;
             }
 
@@ -225,7 +236,7 @@ export class AiAgentService {
                 status: 'draft',
                 createdAt: new Date().toISOString(),
                 aiMetadata: {
-                    model: 'Gemini-3-Flash (Strict Search)',
+                    model: 'Gemini-2.0-Flash (Future Mode)',
                     discoveryQuery: searchStrategy,
                     discoveryDate: new Date().toISOString()
                 }
@@ -248,7 +259,7 @@ export class AiAgentService {
     // We try to use the AI to "read" the page via search tool or browsing
     try {
         const response = await this.executeStrictSearch({
-            model: 'gemini-3-flash-preview',
+            model: 'gemini-2.0-flash',
             contents: `Analyze this URL: ${url}. Return JSON: {title, organizer, deadline (YYYY-MM-DD), prize, type, description}.`,
             config: { 
                 tools: [{ googleSearch: {} }], 
@@ -290,7 +301,7 @@ export class AiAgentService {
             createdAt: new Date().toISOString(),
             aiConfidenceScore: 90,
             aiReasoning: "Direct URL Analysis",
-            aiMetadata: { model: 'Gemini-3 (URL Mode)', discoveryQuery: url, discoveryDate: new Date().toISOString() }
+            aiMetadata: { model: 'Gemini-2.0 (URL Mode)', discoveryQuery: url, discoveryDate: new Date().toISOString() }
         }];
 
     } catch (error: any) {
