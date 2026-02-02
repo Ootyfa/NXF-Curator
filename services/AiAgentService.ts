@@ -67,16 +67,19 @@ export class AiAgentService {
           throw new Error("No API Keys configured. Cannot fetch WWW data.");
       }
 
-      // Prioritize 2.0 Flash for speed/stability, 1.5 Flash as backup
-      const models = ['gemini-2.0-flash', 'gemini-1.5-flash']; 
+      // Updated Model List to avoid 404 errors on v1beta
+      // gemini-2.0-flash-exp is the current stable-ish beta model
+      const models = ['gemini-2.0-flash-exp', 'gemini-2.0-flash']; 
       
       // Calculate max attempts (allow cycling through keys multiple times)
       const maxTotalAttempts = Math.max(3, this.apiKeys.length * 2);
 
       for (let attempt = 1; attempt <= maxTotalAttempts; attempt++) {
           const apiKey = this.getNextKey();
-          // Use primary model mostly, switch to backup if we are retrying a lot
-          const model = attempt > this.apiKeys.length ? models[1] || models[0] : models[0];
+          
+          // Switch model on retries if the first one fails repeatedly
+          const modelIndex = attempt > this.apiKeys.length ? 1 : 0;
+          const model = models[modelIndex] || models[0];
 
           try {
               // 1. THROTTLE (Critical for avoiding 429 bursts)
@@ -103,7 +106,18 @@ export class AiAgentService {
               return result;
 
           } catch (error: any) {
-              const msg = error.message || "";
+              const msg = error.message || JSON.stringify(error);
+              
+              // Handle 404 Model Not Found specifically
+              if (msg.includes('404') || msg.includes('not found')) {
+                  console.warn(`Model ${model} not found, skipping.`);
+                  // If we are on the primary model, force switch to backup for next loop
+                  // But since we loop, next attempt might pick up backup if logic allows, 
+                  // or we just continue to try next key. 
+                  // In this specific loop logic, let's just log and continue.
+                  continue;
+              }
+
               const isRateLimit = msg.includes('429') || msg.includes('503');
               
               if (isRateLimit) {
@@ -117,9 +131,10 @@ export class AiAgentService {
                    continue; // Loop continues, effectively trying next key via getNextKey()
               }
               
-              console.warn(`Error on attempt ${attempt}:`, msg);
+              console.warn(`Error on attempt ${attempt} (${model}):`, msg);
+              
               // Non-retriable error or out of attempts
-              if (attempt === maxTotalAttempts) throw error;
+              if (attempt === maxTotalAttempts) throw new Error(`Search failed: ${msg}`);
           }
       }
       throw new Error("API Quota Exceeded. All keys rate limited.");
@@ -171,7 +186,7 @@ export class AiAgentService {
 
     try {
         const response = await this.executeStrictSearch({
-            model: 'gemini-2.0-flash', 
+            model: 'gemini-2.0-flash-exp', // Default to primary model
             contents: prompt,
             config: { 
                 tools: [{ googleSearch: {} }], 
@@ -285,7 +300,7 @@ export class AiAgentService {
     
     try {
         const response = await this.executeStrictSearch({
-            model: 'gemini-2.0-flash',
+            model: 'gemini-2.0-flash-exp',
             contents: `Analyze this URL: ${url}. Return JSON: {title, organizer, deadline (YYYY-MM-DD), prize, type, description}.`,
             config: { 
                 tools: [{ googleSearch: {} }], 
