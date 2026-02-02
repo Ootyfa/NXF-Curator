@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Lock, Sparkles, Save, RefreshCw, CheckCircle, ArrowRight, Clipboard, Database } from 'lucide-react';
+import { Lock, Sparkles, Save, RefreshCw, CheckCircle, ArrowRight, Clipboard, Database, ShieldAlert, Activity } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { aiAgentService } from '../services/AiAgentService';
 import { opportunityService } from '../services/OpportunityService';
@@ -19,11 +19,17 @@ const AgentScanner: React.FC = () => {
   const [extractedData, setExtractedData] = useState<Partial<Opportunity> | null>(null);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const [statusMsg, setStatusMsg] = useState('');
+  
+  // Debug State
+  const [debugInfo, setDebugInfo] = useState<any>(null);
 
   useEffect(() => {
     const token = sessionStorage.getItem('nxf_curator_token');
-    if (token === 'verified') setIsAuthenticated(true);
-  }, []);
+    if (token === 'verified') {
+        setIsAuthenticated(true);
+        setDebugInfo(aiAgentService.getDebugInfo());
+    }
+  }, [isAuthenticated]);
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -39,11 +45,16 @@ const AgentScanner: React.FC = () => {
     if (!rawText.trim()) return;
     setIsProcessing(true);
     setSaveStatus('idle');
+    setExtractedData(null);
+    setStatusMsg('');
+    
     try {
       const data = await aiAgentService.extractOpportunityFromText(rawText);
       setExtractedData(data);
     } catch (e: any) {
-      alert(`AI Extraction Failed: ${e.message}`);
+      console.error(e);
+      setStatusMsg(`AI Error: ${e.message}`);
+      setSaveStatus('error');
     } finally {
       setIsProcessing(false);
     }
@@ -63,11 +74,11 @@ const AgentScanner: React.FC = () => {
       if (result.success) {
         setSaveStatus('success');
         setStatusMsg('Opportunity Published Successfully!');
-        // Reset after 2s
         setTimeout(() => {
              setSaveStatus('idle');
              setExtractedData(null);
              setRawText('');
+             setStatusMsg('');
         }, 2000);
       } else {
         setSaveStatus('error');
@@ -149,12 +160,29 @@ const AgentScanner: React.FC = () => {
                   </button>
               </div>
               
+              <div className="bg-blue-50 p-2 text-xs text-blue-800 border-b border-blue-100 flex items-center justify-between">
+                  <span className="flex items-center"><Activity size={12} className="mr-1"/> System Status:</span>
+                  {debugInfo && (
+                      <span className="font-mono">
+                          Groq: {debugInfo.groqStatus} | Google: {debugInfo.googleKeys > 0 ? 'Ready' : 'Missing Key'}
+                      </span>
+                  )}
+                  <button onClick={() => window.location.reload()} className="hover:underline">Reload</button>
+              </div>
+              
               <textarea 
                   className="flex-grow p-4 resize-none focus:outline-none text-sm font-mono text-gray-600 leading-relaxed"
                   placeholder="Paste website content, email text, or raw grant details here..."
                   value={rawText}
                   onChange={(e) => setRawText(e.target.value)}
               />
+
+              {saveStatus === 'error' && statusMsg && (
+                   <div className="p-3 bg-red-100 border-t border-red-200 text-red-700 text-sm flex items-start">
+                       <ShieldAlert size={16} className="mr-2 mt-0.5 flex-shrink-0" />
+                       <span className="break-all">{statusMsg}</span>
+                   </div>
+              )}
 
               <div className="p-4 border-t border-gray-100 bg-gray-50">
                   <Button 
@@ -164,7 +192,7 @@ const AgentScanner: React.FC = () => {
                     className="flex items-center justify-center py-3 text-lg"
                   >
                       {isProcessing ? (
-                          <>Processing with AI... <RefreshCw className="animate-spin ml-2" /></>
+                          <>Processing... <RefreshCw className="animate-spin ml-2" /></>
                       ) : (
                           <>Extract & Format Data <Sparkles className="ml-2" /></>
                       )}
@@ -237,7 +265,6 @@ const AgentScanner: React.FC = () => {
                           {saveStatus === 'saving' ? 'Publishing...' : 'Publish to Database'}
                       </Button>
                   )}
-                  {saveStatus === 'error' && <p className="text-red-500 text-xs text-center mt-2">{statusMsg}</p>}
               </div>
           </div>
 
