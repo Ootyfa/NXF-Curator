@@ -4,15 +4,21 @@ import { Opportunity } from "../types";
 export class AiAgentService {
   private apiKeys: string[] = [];
   private currentKeyIndex = 0;
-
-  // Use specific model versions to avoid 404 errors with aliases in v1beta
-  private readonly PRIMARY_MODEL = "gemini-1.5-flash-002";
-  private readonly FALLBACK_MODEL = "gemini-2.0-flash-exp"; 
+  
+  // List of models to try in order. 
+  // If one fails with 404 (Not Found) or 503 (Overloaded), we try the next.
+  private readonly MODELS = [
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-002",
+    "gemini-1.5-flash-001",
+    "gemini-1.5-pro",
+    "gemini-1.5-flash-8b"
+  ];
 
   constructor() {
     try {
         const env = (import.meta as any).env || {};
-        // Support multiple environment variables and comma-separated keys
+        // Support multiple environment variables and comma-separated keys for pool management
         const potentialVars = [
             env.VITE_GOOGLE_API_KEY,          
             env.GOOGLE_API_KEY,
@@ -34,16 +40,13 @@ export class AiAgentService {
         if (this.apiKeys.length === 0) {
             console.warn("AiAgentService: No API keys found. Please set VITE_GOOGLE_API_KEY.");
         } else {
-            console.log(`AiAgentService: Loaded ${this.apiKeys.length} API key(s).`);
+            console.log(`AiAgentService: Initialized with ${this.apiKeys.length} API key(s).`);
         }
     } catch (e) {
         console.error("Failed to load keys", e);
     }
   }
 
-  /**
-   * Get the next API key in the rotation.
-   */
   private getNextKey(): string {
       if (this.apiKeys.length === 0) throw new Error("No API Keys configured");
       const key = this.apiKeys[this.currentKeyIndex];
@@ -53,7 +56,7 @@ export class AiAgentService {
 
   // ===== CORE FUNCTION: RAW TEXT -> JSON =====
   async extractOpportunityFromText(rawText: string): Promise<Partial<Opportunity>> {
-      // Schema definition for structured JSON output
+      // Define strictly typed schema for the AI response
       const schema: Schema = {
         type: Type.OBJECT,
         properties: {
@@ -94,7 +97,7 @@ export class AiAgentService {
         4. 'deadlineDate' MUST be YYYY-MM-DD.
       `;
 
-      // Execute with smart retry logic handling 404s and 429s
+      // Execute with robustness strategy
       return this.executeWithSmartRetry(async (apiKey, modelId) => {
           const ai = new GoogleGenAI({ apiKey });
           const response = await ai.models.generateContent({
@@ -110,77 +113,66 @@ export class AiAgentService {
   }
 
   /**
-   * Executes an operation with:
-   * 1. Round-robin key rotation
-   * 2. Exponential backoff
-   * 3. Model fallback on 404
+   * Smart Execution Strategy:
+   * 1. Iterates through attempts.
+   * 2. If 404 (Model Not Found) -> Switches to next Model in list.
+   * 3. If 429 (Quota) -> Switches to next API Key.
+   * 4. If other error -> Retries with backoff.
    */
   private async executeWithSmartRetry(
       operation: (apiKey: string, modelId: string) => Promise<string | undefined>
   ): Promise<Partial<Opportunity>> {
-      let lastError: any;
-      const MAX_ATTEMPTS = 5;
       
-      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-          const apiKey = this.getNextKey();
-          
+      let lastError: any;
+      const MAX_TOTAL_ATTEMPTS = 8; // Allow enough tries for model switching AND key rotation
+      let currentModelIndex = 0;
+
+      for (let attempt = 1; attempt <= MAX_TOTAL_ATTEMPTS; attempt++) {
+          // Get current key (rotates only on specific triggers or natural round-robin if desired, 
+          // here we assume getNextKey() gives us the current one to use)
+          const apiKey = this.apiKeys[this.currentKeyIndex]; 
+          const modelId = this.MODELS[currentModelIndex];
+
           try {
-              let text: string | undefined;
-              let usedModel = this.PRIMARY_MODEL;
-
-              try {
-                  text = await operation(apiKey, this.PRIMARY_MODEL);
-              } catch (err: any) {
-                  // Handle Model Not Found (404) specifically by trying fallback model
-                  if (this.isModelNotFoundError(err)) {
-                      console.warn(`AiAgent: Model ${this.PRIMARY_MODEL} not found/supported. Retrying with ${this.FALLBACK_MODEL}`);
-                      usedModel = this.FALLBACK_MODEL;
-                      text = await operation(apiKey, this.FALLBACK_MODEL);
-                  } else {
-                      throw err; // Re-throw for outer catch to handle quota/rotation
-                  }
-              }
-
+              const text = await operation(apiKey, modelId);
+              
               if (!text) throw new Error("Empty response from AI");
               
               const parsed = JSON.parse(text);
-              return this.augmentData(parsed, usedModel);
+              return this.augmentData(parsed, modelId);
 
           } catch (error: any) {
               lastError = error;
-              console.warn(`AiAgent: Attempt ${attempt} failed (Key ending ...${apiKey.slice(-4)}): ${error.message}`);
+              const msg = error.message?.toLowerCase() || '';
+              const isQuota = error.status === 429 || msg.includes('429') || msg.includes('quota') || msg.includes('exhausted');
+              const isModelError = error.status === 404 || msg.includes('404') || msg.includes('not found') || msg.includes('unsupported');
 
-              const isQuota = this.isQuotaError(error);
-              
-              if (attempt === MAX_ATTEMPTS) break;
+              console.warn(`AiAgent Attempt ${attempt} failed | Key: ...${apiKey.slice(-4)} | Model: ${modelId} | Error: ${msg}`);
 
-              // Backoff Strategy
-              // If it's a quota error, we've already rotated the key for the next loop (via getNextKey)
-              // We add a delay to allow the system to recover or to just space out requests.
-              let backoff = 1000;
-              if (isQuota) {
-                   // Exponential backoff for quota errors: 1s, 2s, 4s, 8s
-                   backoff = Math.pow(2, attempt - 1) * 1000;
+              if (attempt === MAX_TOTAL_ATTEMPTS) break;
+
+              if (isModelError) {
+                  // Strategy: Try next model
+                  console.warn(`-> Model ${modelId} failed. Switching model.`);
+                  currentModelIndex = (currentModelIndex + 1) % this.MODELS.length;
+                  // Don't sleep long for 404s, just try next config
+                  await new Promise(r => setTimeout(r, 500));
+              } else if (isQuota) {
+                  // Strategy: Rotate Key
+                  console.warn(`-> Quota exceeded. Rotating API Key.`);
+                  this.getNextKey(); // Advances index
+                  // Exponential backoff
+                  const backoff = Math.min(1000 * Math.pow(2, attempt), 8000);
+                  await new Promise(r => setTimeout(r, backoff));
               } else {
-                   // Shorter backoff for transient network errors
-                   backoff = 500;
+                  // Strategy: Transient error, wait and retry (maybe rotate key too just in case)
+                  this.getNextKey(); 
+                  await new Promise(r => setTimeout(r, 2000));
               }
-              
-              await new Promise(r => setTimeout(r, backoff));
           }
       }
 
       throw lastError || new Error("Failed to extract opportunity after multiple attempts. All keys/models may be exhausted.");
-  }
-
-  private isQuotaError(error: any): boolean {
-      const msg = error.message?.toLowerCase() || '';
-      return error.status === 429 || error.status === 503 || msg.includes('429') || msg.includes('quota') || msg.includes('exhausted');
-  }
-
-  private isModelNotFoundError(error: any): boolean {
-       const msg = error.message?.toLowerCase() || '';
-       return error.status === 404 || msg.includes('404') || msg.includes('not found');
   }
 
   private augmentData(parsed: any, model: string): Partial<Opportunity> {
