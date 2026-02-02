@@ -1,6 +1,5 @@
 import { supabase } from './supabase';
 import { Opportunity } from '../types';
-import { emailService } from './EmailService';
 import { OPPORTUNITIES as MOCK_DATA } from '../constants';
 
 class OpportunityService {
@@ -37,24 +36,34 @@ class OpportunityService {
   // --- MANUAL CURATION API ---
 
   async createOpportunity(opp: Partial<Opportunity>): Promise<{ success: boolean; id?: string; error?: string }> {
-      const row = this.mapToDb(opp);
-      
-      // Ensure status is published for manual entry
-      row.status = 'published';
-      row.verification_status = 'verified';
+      try {
+          const row = this.mapToDb(opp);
+          
+          // Ensure status is published for manual entry
+          row.status = 'published';
+          row.verification_status = 'verified';
 
-      const { data, error } = await supabase
-          .from('opportunities')
-          .insert(row)
-          .select()
-          .single();
+          // Sanitize Date: Postgres will throw error if date is empty string
+          if (!row.deadline_date || row.deadline_date.trim() === '') {
+              row.deadline_date = null;
+          }
 
-      if (error) {
-          console.error("DB Insert Error", error);
-          return { success: false, error: error.message };
+          const { data, error } = await supabase
+              .from('opportunities')
+              .insert(row)
+              .select()
+              .single();
+
+          if (error) {
+              console.error("DB Insert Error", error);
+              return { success: false, error: error.message };
+          }
+
+          return { success: true, id: data.id };
+      } catch (err: any) {
+          console.error("OpportunityService Unexpected Error", err);
+          return { success: false, error: err.message || "Unknown error occurred" };
       }
-
-      return { success: true, id: data.id };
   }
 
   // --- MAPPING HELPERS ---
@@ -125,7 +134,6 @@ class OpportunityService {
 
   async submitDetailedFeedback(id: string, feedback: any) {
     console.log(`[OpportunityService] Submitting feedback for ${id}`, feedback);
-    // In a real app, we would upsert into a feedback table or increment counters in opportunities
   }
 
   async organizerVerify(id: string) {

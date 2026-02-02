@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Lock, Sparkles, Save, RefreshCw, CheckCircle, ArrowRight, Clipboard, Database, ShieldAlert, Activity, Globe, Search } from 'lucide-react';
+import { Lock, Sparkles, Save, RefreshCw, CheckCircle, ArrowRight, Clipboard, Database, ShieldAlert, Activity, Globe, Search, Link as LinkIcon } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { aiAgentService } from '../services/AiAgentService';
 import { opportunityService } from '../services/OpportunityService';
@@ -17,7 +17,6 @@ const AgentScanner: React.FC = () => {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // Workflow State
-  const [inputMode, setInputMode] = useState<'text' | 'url'>('text');
   const [urlInput, setUrlInput] = useState('');
   const [rawText, setRawText] = useState('');
   
@@ -58,8 +57,6 @@ const AgentScanner: React.FC = () => {
 
       if (error) {
           // 2. Special Case: Auto-Provisioning for the Dev Account
-          // If the login fails but the credentials match the hardcoded dev keys,
-          // try to register the user automatically.
           if (authEmail === 'nxfindiax@gmail.com' && authPass === 'Ooty2026!"§') {
               console.log("Dev credentials detected. Attempting auto-registration...");
               const { data: upData, error: upError } = await supabase.auth.signUp({
@@ -69,7 +66,6 @@ const AgentScanner: React.FC = () => {
               });
 
               if (upError) {
-                  // If user exists but login failed, it might be an unconfirmed email or wrong password
                   if (upError.message.includes("already registered")) {
                        throw new Error("User exists but login failed. Please check your email for a confirmation link.");
                   }
@@ -93,13 +89,10 @@ const AgentScanner: React.FC = () => {
     } catch (err: any) {
       console.error("Login failed:", err);
       let msg = err.message;
-      
-      // Check for missing keys in environment
       const env = (import.meta as any).env || {};
       if (!env.VITE_SUPABASE_URL || !env.VITE_SUPABASE_ANON_KEY) {
           msg = "Supabase API Keys are missing in Netlify/Environment variables.";
       }
-      
       setAuthError(msg);
     } finally {
       setIsLoggingIn(false);
@@ -115,9 +108,7 @@ const AgentScanner: React.FC = () => {
       try {
           const content = await webScraperService.fetchUrlContent(urlInput);
           setRawText(content);
-          // Auto switch to text view to show result
-          // setInputMode('text'); 
-          setStatusMsg('Website content fetched successfully! Click "Extract" to process.');
+          setStatusMsg('Website content fetched! AI will now use this content.');
       } catch (e: any) {
           setStatusMsg(e.message);
           setSaveStatus('error');
@@ -127,22 +118,35 @@ const AgentScanner: React.FC = () => {
   };
 
   const processText = async () => {
-    if (!rawText.trim()) return;
+    if (!rawText.trim() && !urlInput) return;
     setIsProcessing(true);
     setSaveStatus('idle');
     setExtractedData(null);
     setStatusMsg('');
     
     try {
-      // If we scraped a URL, pass that context to the AI
-      const contextPrefix = urlInput ? `SOURCE URL: ${urlInput}\n\n` : '';
-      const data = await aiAgentService.extractOpportunityFromText(contextPrefix + rawText);
-      
-      // If URL was used, ensure it's in the data
-      if (urlInput && !data.contact?.website) {
-          data.contact = { ...data.contact, website: urlInput } as any;
+      // Logic: If rawText is empty but URL is present, try fetching it first
+      let textToProcess = rawText;
+      if (!textToProcess && urlInput) {
+           setStatusMsg('Fetching URL content first...');
+           try {
+               textToProcess = await webScraperService.fetchUrlContent(urlInput);
+               setRawText(textToProcess); // show it to user
+           } catch (err) {
+               console.warn("Could not fetch URL, trying AI with just URL...", err);
+           }
       }
+
+      const contextPrefix = urlInput ? `SOURCE URL: ${urlInput}\n\n` : '';
+      const finalPrompt = contextPrefix + (textToProcess || `(No content fetched, please extract info from this URL if possible: ${urlInput})`);
+
+      const data = await aiAgentService.extractOpportunityFromText(finalPrompt);
+      
+      // Merge URL into data if not found
       if (urlInput) {
+          if (!data.contact?.website) {
+            data.contact = { ...data.contact, website: urlInput } as any;
+          }
           data.sourceUrl = urlInput;
       }
 
@@ -164,6 +168,7 @@ const AgentScanner: React.FC = () => {
   const saveToDb = async () => {
     if (!extractedData) return;
     setSaveStatus('saving');
+    setStatusMsg('');
     
     try {
       const result = await opportunityService.createOpportunity(extractedData);
@@ -179,7 +184,12 @@ const AgentScanner: React.FC = () => {
         }, 2000);
       } else {
         setSaveStatus('error');
-        setStatusMsg(`DB Error: ${result.error}`);
+        // Handle "Load failed" specifically
+        if (result.error?.includes("Load failed")) {
+            setStatusMsg("DB Connection Failed. Check if an AdBlocker is blocking Supabase or if your network is restricted.");
+        } else {
+            setStatusMsg(`DB Error: ${result.error}`);
+        }
       }
     } catch (e: any) {
         setSaveStatus('error');
@@ -247,63 +257,48 @@ const AgentScanner: React.FC = () => {
           
           {/* LEFT: INPUT AREA */}
           <div className="flex flex-col bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden h-full">
-              
-              {/* Tabs */}
-              <div className="flex border-b border-gray-200">
-                  <button 
-                    onClick={() => setInputMode('text')}
-                    className={`flex-1 py-3 text-sm font-medium flex items-center justify-center ${inputMode === 'text' ? 'bg-white text-primary border-b-2 border-primary' : 'bg-gray-50 text-gray-500'}`}
-                  >
-                      <Clipboard size={16} className="mr-2" /> Paste Text
-                  </button>
-                  <button 
-                    onClick={() => setInputMode('url')}
-                    className={`flex-1 py-3 text-sm font-medium flex items-center justify-center ${inputMode === 'url' ? 'bg-white text-primary border-b-2 border-primary' : 'bg-gray-50 text-gray-500'}`}
-                  >
-                      <Globe size={16} className="mr-2" /> Fetch URL
-                  </button>
-              </div>
-
-              {/* Status Bar */}
-              <div className="bg-blue-50 p-2 text-xs text-blue-800 border-b border-blue-100 flex items-center justify-between">
-                  <span className="flex items-center"><Activity size={12} className="mr-1"/> System Status:</span>
-                  {debugInfo && (
-                      <span className="font-mono">
-                          Groq: {debugInfo.groqStatus} | Auth: Verified
-                      </span>
-                  )}
-              </div>
-              
-              {/* Input Area */}
-              <div className="flex-grow flex flex-col p-4 overflow-hidden relative">
+              <div className="p-4 border-b border-gray-100 bg-gray-50 flex flex-col gap-2">
+                  <div className="flex justify-between items-center mb-2">
+                      <h2 className="font-bold text-gray-700 flex items-center">
+                          <Globe size={18} className="mr-2 text-primary" /> Source
+                      </h2>
+                      {debugInfo && (
+                        <span className="text-xs text-gray-400 font-mono">
+                            Groq: {debugInfo.groqStatus}
+                        </span>
+                      )}
+                  </div>
                   
-                  {inputMode === 'url' && (
-                      <div className="mb-4 space-y-2">
-                          <label className="text-xs font-bold text-gray-500 uppercase">Target URL</label>
-                          <div className="flex gap-2">
-                              <input 
-                                type="text" 
-                                placeholder="https://example.com/grant-details" 
-                                className="flex-grow p-2 border border-gray-300 rounded text-sm focus:border-primary outline-none"
-                                value={urlInput}
-                                onChange={(e) => setUrlInput(e.target.value)}
-                              />
-                              <Button onClick={handleFetchUrl} disabled={!urlInput || isFetchingUrl} variant="secondary">
-                                  {isFetchingUrl ? <RefreshCw className="animate-spin" size={18} /> : <Search size={18} />}
-                              </Button>
-                          </div>
-                          <p className="text-xs text-gray-400">
-                             Uses a proxy to fetch content. If it fails, copy the text manually.
-                          </p>
-                      </div>
-                  )}
-
+                  {/* URL Input Row */}
+                  <div className="flex gap-2 w-full">
+                       <div className="relative flex-grow">
+                           <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                               <LinkIcon size={14} className="text-gray-400" />
+                           </div>
+                           <input 
+                              type="text" 
+                              placeholder="https://example.com/grant-page" 
+                              className="w-full pl-9 p-2 border border-gray-300 rounded text-sm focus:border-primary focus:ring-1 focus:ring-primary outline-none"
+                              value={urlInput}
+                              onChange={(e) => setUrlInput(e.target.value)}
+                           />
+                       </div>
+                       <Button onClick={handleFetchUrl} disabled={!urlInput || isFetchingUrl} variant="secondary" className="px-3">
+                           {isFetchingUrl ? <RefreshCw className="animate-spin" size={16} /> : <Search size={16} />}
+                       </Button>
+                  </div>
+                  <p className="text-[10px] text-gray-400">
+                      Paste a URL above to auto-fetch, or simply paste raw text below.
+                  </p>
+              </div>
+              
+              <div className="flex-grow flex flex-col p-4 overflow-hidden relative">
                   <label className="text-xs font-bold text-gray-500 uppercase mb-2">
-                      {inputMode === 'url' ? 'Scraped Content' : 'Raw Content'}
+                      Raw Content / Scraped Text
                   </label>
                   <textarea 
                       className="flex-grow p-3 border border-gray-200 rounded resize-none focus:outline-none text-sm font-mono text-gray-600 leading-relaxed bg-gray-50"
-                      placeholder={inputMode === 'url' ? "Content will appear here after fetching..." : "Paste website content, email text, or raw grant details here..."}
+                      placeholder="Paste text here, or fetch from URL above..."
                       value={rawText}
                       onChange={(e) => setRawText(e.target.value)}
                   />
@@ -314,19 +309,17 @@ const AgentScanner: React.FC = () => {
                           <span className="break-all">{statusMsg}</span>
                       </div>
                   )}
-
-                  {inputMode === 'url' && statusMsg && saveStatus !== 'error' && (
+                  {saveStatus !== 'error' && statusMsg && (
                        <div className="mt-3 p-3 bg-green-100 text-green-700 text-sm flex items-center rounded">
                            <CheckCircle size={16} className="mr-2" /> {statusMsg}
                        </div>
                   )}
-
               </div>
 
               <div className="p-4 border-t border-gray-100 bg-gray-50">
                   <Button 
                     onClick={processText} 
-                    disabled={!rawText || isProcessing}
+                    disabled={(!rawText && !urlInput) || isProcessing}
                     fullWidth 
                     className="flex items-center justify-center py-3 text-lg"
                   >
@@ -384,6 +377,11 @@ const AgentScanner: React.FC = () => {
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                              <FormInput label="Website URL" value={extractedData.contact?.website} onChange={v => handleFieldChange('contact', { ...extractedData.contact, website: v })} />
                              <FormInput label="Application Fee" value={extractedData.applicationFee} onChange={v => handleFieldChange('applicationFee', v)} />
+                          </div>
+                          
+                          {/* New Source URL Field for Manual Override */}
+                           <div className="grid grid-cols-1 gap-4">
+                             <FormInput label="Source URL (Verification)" value={extractedData.sourceUrl} onChange={v => handleFieldChange('sourceUrl', v)} />
                           </div>
                       </div>
                   )}
