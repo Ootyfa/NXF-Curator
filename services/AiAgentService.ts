@@ -5,6 +5,9 @@ export type SearchDomain = 'Film' | 'Visual Arts' | 'Music' | 'Literature' | 'Pe
 
 export class AiAgentService {
   private apiKeys: string[] = [];
+  private currentKeyIndex = 0;
+  private lastRequestTime = 0;
+  private readonly MIN_REQUEST_INTERVAL = 3000; // 3 seconds mandatory delay between requests
 
   constructor() {
     try {
@@ -24,12 +27,37 @@ export class AiAgentService {
         });
 
         this.apiKeys = [...new Set(collectedKeys)];
+        if (this.apiKeys.length > 0) {
+            console.log(`AiAgentService initialized with ${this.apiKeys.length} API keys.`);
+        }
     } catch (e) {
         console.error("Failed to load keys", e);
     }
   }
 
-  // --- API EXECUTION WITH EXPONENTIAL BACKOFF ---
+  // --- THROTTLING HELPER ---
+  // Ensures we never hit the API faster than allowed, regardless of key
+  private async enforceRateLimit(logCallback?: (msg: string) => void) {
+      const now = Date.now();
+      const timeSinceLast = now - this.lastRequestTime;
+      
+      if (timeSinceLast < this.MIN_REQUEST_INTERVAL) {
+          const wait = this.MIN_REQUEST_INTERVAL - timeSinceLast;
+          // if (logCallback) logCallback(`⏳ Throttling: Waiting ${Math.round(wait/100)/10}s...`);
+          await new Promise(r => setTimeout(r, wait));
+      }
+      this.lastRequestTime = Date.now();
+  }
+
+  // --- ROUND-ROBIN KEY ROTATION ---
+  private getNextKey(): string {
+      if (this.apiKeys.length === 0) throw new Error("No API Keys configured.");
+      const key = this.apiKeys[this.currentKeyIndex];
+      this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
+      return key;
+  }
+
+  // --- API EXECUTION CORE ---
   private async executeStrictSearch(
     params: { model: string, contents: any, config: any },
     logCallback: (msg: string) => void
@@ -39,60 +67,65 @@ export class AiAgentService {
           throw new Error("No API Keys configured. Cannot fetch WWW data.");
       }
 
-      // Gemini 2.0 Flash is generally more stable and faster for high-volume search
+      // Prioritize 2.0 Flash for speed/stability, 1.5 Flash as backup
       const models = ['gemini-2.0-flash', 'gemini-1.5-flash']; 
+      
+      // Calculate max attempts (allow cycling through keys multiple times)
+      const maxTotalAttempts = Math.max(3, this.apiKeys.length * 2);
 
-      for (const model of models) {
-          for (let i = 0; i < this.apiKeys.length; i++) {
-              const apiKey = this.apiKeys[i];
+      for (let attempt = 1; attempt <= maxTotalAttempts; attempt++) {
+          const apiKey = this.getNextKey();
+          // Use primary model mostly, switch to backup if we are retrying a lot
+          const model = attempt > this.apiKeys.length ? models[1] || models[0] : models[0];
+
+          try {
+              // 1. THROTTLE (Critical for avoiding 429 bursts)
+              await this.enforceRateLimit(logCallback);
+
+              // 2. EXECUTE
+              const ai = new GoogleGenAI({ apiKey });
               
-              // Retry Logic with Backoff (3 attempts)
-              for (let attempt = 1; attempt <= 3; attempt++) {
-                  try {
-                      const ai = new GoogleGenAI({ apiKey });
-                      
-                      // logCallback(`Attempting ${model} (Key ${i+1}, Try ${attempt})...`);
-                      
-                      const result = await ai.models.generateContent({
-                          ...params,
-                          model: model
-                      });
-                      
-                      // Validation: Did it actually search?
-                      const hasGrounding = !!result.candidates?.[0]?.groundingMetadata?.groundingChunks;
-                      const isUrlAnalysis = JSON.stringify(params.contents).includes('http');
-                      
-                      if (!hasGrounding && !isUrlAnalysis) {
-                          // If it refused to search, treat as soft fail and maybe try next model
-                          if (attempt === 3) console.warn(`${model} skipped search.`);
-                          continue; 
-                      }
-
-                      return result;
-
-                  } catch (error: any) {
-                      const msg = error.message || "";
-                      const isRateLimit = msg.includes('429') || msg.includes('503');
-                      
-                      if (isRateLimit) {
-                           // EXPONENTIAL BACKOFF: 2s -> 4s -> 8s
-                           const waitTime = 2000 * Math.pow(2, attempt - 1);
-                           logCallback(`⚠️ Rate Limit (429) on Key ${i+1}. Cooling down for ${waitTime/1000}s...`);
-                           await new Promise(r => setTimeout(r, waitTime));
-                           continue; // Retry loop
-                      }
-                      
-                      // If it's not a rate limit (e.g. 400 Bad Request), don't retry same key
-                      console.warn(`Error on ${model}:`, msg);
-                      break; // Break retry loop, try next key
-                  }
+              const result = await ai.models.generateContent({
+                  ...params,
+                  model: model
+              });
+              
+              // 3. VALIDATE
+              const hasGrounding = !!result.candidates?.[0]?.groundingMetadata?.groundingChunks;
+              const isUrlAnalysis = JSON.stringify(params.contents).includes('http');
+              
+              if (!hasGrounding && !isUrlAnalysis) {
+                  console.warn(`Attempt ${attempt}: ${model} returned no grounding data.`);
+                  if (attempt === maxTotalAttempts) throw new Error("AI returned no search results.");
+                  continue; // Try next key/model
               }
+
+              return result;
+
+          } catch (error: any) {
+              const msg = error.message || "";
+              const isRateLimit = msg.includes('429') || msg.includes('503');
+              
+              if (isRateLimit) {
+                   // If we have multiple keys, we can switch almost immediately.
+                   // If we only have 1 key, we must wait longer.
+                   const isMultiKey = this.apiKeys.length > 1;
+                   const waitTime = isMultiKey ? 1000 : 5000 * Math.pow(1.5, attempt);
+                   
+                   logCallback(`⚠️ Rate Limit (429) on Key ...${apiKey.slice(-4)}. Switching in ${waitTime/1000}s...`);
+                   await new Promise(r => setTimeout(r, waitTime));
+                   continue; // Loop continues, effectively trying next key via getNextKey()
+              }
+              
+              console.warn(`Error on attempt ${attempt}:`, msg);
+              // Non-retriable error or out of attempts
+              if (attempt === maxTotalAttempts) throw error;
           }
       }
-      throw new Error("Unable to connect to Google Search. All keys/models exhausted.");
+      throw new Error("API Quota Exceeded. All keys rate limited.");
   }
 
-  // Helper to normalize URLs for comparison (ignore www, https, trailing slash)
+  // Helper to normalize URLs
   private normalizeUrl(url: string): string {
       try {
           return url.replace(/^(https?:\/\/)?(www\.)?/, '').replace(/\/$/, '').toLowerCase().split('?')[0];
@@ -101,7 +134,7 @@ export class AiAgentService {
       }
   }
 
-  // --- MAIN DISCOVERY FUNCTION (Strict Web Only) ---
+  // --- MAIN DISCOVERY FUNCTION ---
   async scanWeb(logCallback: (msg: string) => void, domain: SearchDomain): Promise<Opportunity[]> {
     const TODAY_STR = new Date().toLocaleDateString("en-US", { year: 'numeric', month: 'long', day: 'numeric' });
     const CURRENT_YEAR = new Date().getFullYear();
@@ -138,7 +171,7 @@ export class AiAgentService {
 
     try {
         const response = await this.executeStrictSearch({
-            model: 'gemini-2.0-flash', // Switched to 2.0 Flash for stability
+            model: 'gemini-2.0-flash', 
             contents: prompt,
             config: { 
                 tools: [{ googleSearch: {} }], 
@@ -148,7 +181,7 @@ export class AiAgentService {
 
         logCallback("✅ Data received. Verifying Freshness...");
 
-        // 1. Extract Grounding Metadata (The Proof)
+        // 1. Extract Grounding Metadata
         const groundingChunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
         const verifiedUrls = new Set<string>();
         const normalizedVerifiedUrls = new Set<string>();
@@ -182,32 +215,26 @@ export class AiAgentService {
         const today = new Date();
 
         rawData.forEach((item, index) => {
-            // Find a matching source URL (Loose Match)
             let sourceUrl = item.website;
             const normalizedItemUrl = this.normalizeUrl(sourceUrl || '');
             
             const isVerified = normalizedVerifiedUrls.has(normalizedItemUrl) || verifiedUrls.has(sourceUrl);
 
             if (!sourceUrl || !isVerified) {
-                 sourceUrl = Array.from(verifiedUrls)[0]; // Fallback to first grounded source
+                 sourceUrl = Array.from(verifiedUrls)[0]; 
             }
 
-            // FILTER: Must have a future deadline
             let deadlineDate = new Date(item.deadline);
             if (isNaN(deadlineDate.getTime())) {
-                // If text is vague like "Spring 2026", check string content
                 const hasYear = item.deadline.includes(TARGET_YEAR_1.toString()) || item.deadline.includes(TARGET_YEAR_2.toString()) || item.deadline.includes(CURRENT_YEAR.toString());
-                
                 if (hasYear) {
-                    // It's likely valid year, but date is fuzzy. Set a future default.
                     deadlineDate = new Date();
-                    deadlineDate.setFullYear(deadlineDate.getFullYear() + 1); // Push to next year by default for safety
+                    deadlineDate.setFullYear(deadlineDate.getFullYear() + 1);
                 } else {
-                    return; // Skip invalid dates
+                    return; 
                 }
             }
             
-            // Strict Date Check: Must be in future
             if (deadlineDate < today) {
                 return;
             }
@@ -252,11 +279,10 @@ export class AiAgentService {
     }
   }
 
-  // --- URL ANALYZER (Strict Parsing) ---
+  // --- URL ANALYZER ---
   async analyzeSpecificUrl(logCallback: (msg: string) => void, url: string): Promise<Opportunity[]> {
     logCallback(`🕷️ Scraping & Analyzing: ${url}`);
     
-    // We try to use the AI to "read" the page via search tool or browsing
     try {
         const response = await this.executeStrictSearch({
             model: 'gemini-2.0-flash',
@@ -276,7 +302,6 @@ export class AiAgentService {
              if (match) data = JSON.parse(match[0]);
         }
         
-        // Basic Regex Fallback if AI fails to extract but we have the URL
         if (!data.title) {
              const urlObj = new URL(url);
              data.title = urlObj.pathname.split('/').pop()?.replace(/-/g, ' ') || "Untitled Opportunity";
@@ -287,7 +312,7 @@ export class AiAgentService {
             title: data.title || "Unknown Title",
             organizer: data.organizer || "Unknown Organizer",
             deadline: data.deadline || "See Website",
-            daysLeft: 30, // Default if date parsing fails
+            daysLeft: 30,
             grantOrPrize: data.prize || data.grantOrPrize || "See Website",
             type: data.type || "Grant",
             scope: "National",
