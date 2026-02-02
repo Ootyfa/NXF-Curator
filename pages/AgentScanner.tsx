@@ -50,29 +50,57 @@ const AgentScanner: React.FC = () => {
     setIsLoggingIn(true);
 
     try {
-      // REAL SUPABASE LOGIN
-      // This is required to bypass RLS policies on the 'opportunities' table.
-      // Simply checking the string locally is not enough for database write permissions.
+      // 1. Attempt Login
       const { data, error } = await supabase.auth.signInWithPassword({
         email: authEmail,
         password: authPass,
       });
 
       if (error) {
-        throw error;
+          // 2. Special Case: Auto-Provisioning for the Dev Account
+          // If the login fails but the credentials match the hardcoded dev keys,
+          // try to register the user automatically.
+          if (authEmail === 'nxfindiax@gmail.com' && authPass === 'Ooty2026!"§') {
+              console.log("Dev credentials detected. Attempting auto-registration...");
+              const { data: upData, error: upError } = await supabase.auth.signUp({
+                  email: authEmail,
+                  password: authPass,
+                  options: { data: { name: 'Admin Curator' } }
+              });
+
+              if (upError) {
+                  // If user exists but login failed, it might be an unconfirmed email or wrong password
+                  if (upError.message.includes("already registered")) {
+                       throw new Error("User exists but login failed. Please check your email for a confirmation link.");
+                  }
+                  throw upError;
+              }
+
+              if (upData.session) {
+                  setIsAuthenticated(true);
+                  setDebugInfo(aiAgentService.getDebugInfo());
+                  return;
+              } else if (upData.user) {
+                  throw new Error("Admin account created successfully! Please check your email to confirm registration, then log in.");
+              }
+          }
+          
+          throw error;
       }
 
       setIsAuthenticated(true);
       setDebugInfo(aiAgentService.getDebugInfo());
     } catch (err: any) {
       console.error("Login failed:", err);
-      // Fallback: If user enters the hardcoded dev credentials but they don't exist in Supabase yet,
-      // warn them.
-      if (authEmail === 'nxfindiax@gmail.com' && authPass === 'Ooty2026!"§') {
-         setAuthError('Credentials match dev keys, but Supabase Auth failed. Ensure this user exists in your Supabase Auth Users list.');
-      } else {
-         setAuthError(err.message || 'Authentication failed');
+      let msg = err.message;
+      
+      // Check for missing keys in environment
+      const env = (import.meta as any).env || {};
+      if (!env.VITE_SUPABASE_URL || !env.VITE_SUPABASE_ANON_KEY) {
+          msg = "Supabase API Keys are missing in Netlify/Environment variables.";
       }
+      
+      setAuthError(msg);
     } finally {
       setIsLoggingIn(false);
     }
@@ -172,7 +200,7 @@ const AgentScanner: React.FC = () => {
              <p className="text-gray-400 text-sm mt-1">Login to enable Database Write Access</p>
           </div>
           <form onSubmit={handleLogin} className="p-8 space-y-6">
-             {authError && <div className="text-red-400 text-sm text-center bg-red-900/30 p-2 rounded">{authError}</div>}
+             {authError && <div className="text-red-400 text-sm text-center bg-red-900/30 p-2 rounded border border-red-900">{authError}</div>}
              <input 
                 type="email" 
                 placeholder="Email Address" 
