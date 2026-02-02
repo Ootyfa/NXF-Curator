@@ -5,20 +5,18 @@ export class AiAgentService {
   private apiKeys: string[] = [];
   private currentKeyIndex = 0;
   
-  // List of models to try in order. 
-  // If one fails with 404 (Not Found) or 503 (Overloaded), we try the next.
+  // REVISED MODEL STRATEGY: 
+  // Use high-level aliases instead of specific versions (like -001) to avoid 404s.
   private readonly MODELS = [
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-002",
-    "gemini-1.5-flash-001",
-    "gemini-1.5-pro",
-    "gemini-1.5-flash-8b"
+    "gemini-1.5-flash",      // Standard stable alias
+    "gemini-2.0-flash-exp",  // Latest experimental (often very fast)
+    "gemini-1.5-pro",        // Reliable backup
+    "gemini-1.5-flash-8b"    // Lightweight backup
   ];
 
   constructor() {
     try {
         const env = (import.meta as any).env || {};
-        // Support multiple environment variables and comma-separated keys for pool management
         const potentialVars = [
             env.VITE_GOOGLE_API_KEY,          
             env.GOOGLE_API_KEY,
@@ -47,16 +45,9 @@ export class AiAgentService {
     }
   }
 
-  private getNextKey(): string {
-      if (this.apiKeys.length === 0) throw new Error("No API Keys configured");
-      const key = this.apiKeys[this.currentKeyIndex];
-      this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
-      return key;
-  }
-
   // ===== CORE FUNCTION: RAW TEXT -> JSON =====
   async extractOpportunityFromText(rawText: string): Promise<Partial<Opportunity>> {
-      // Define strictly typed schema for the AI response
+      // Define schema
       const schema: Schema = {
         type: Type.OBJECT,
         properties: {
@@ -97,41 +88,57 @@ export class AiAgentService {
         4. 'deadlineDate' MUST be YYYY-MM-DD.
       `;
 
-      // Execute with robustness strategy
       return this.executeWithSmartRetry(async (apiKey, modelId) => {
           const ai = new GoogleGenAI({ apiKey });
-          const response = await ai.models.generateContent({
-              model: modelId,
-              contents: prompt,
-              config: {
-                  responseMimeType: 'application/json',
-                  responseSchema: schema
-              }
-          });
-          return response.text;
+          
+          try {
+            // Attempt 1: Strict JSON Schema
+            const response = await ai.models.generateContent({
+                model: modelId,
+                contents: prompt,
+                config: {
+                    responseMimeType: 'application/json',
+                    responseSchema: schema
+                }
+            });
+            return response.text;
+          } catch (innerError: any) {
+             // Attempt 2: Loose JSON (if Schema fails with 400 or generic error)
+             // Some models/endpoints don't support Schema perfectly yet
+             if (innerError.message?.includes('400') || innerError.message?.includes('schema') || innerError.message?.includes('found')) {
+                 console.warn(`Schema/Model issue for ${modelId}, retrying with loose JSON...`);
+                 const looseResponse = await ai.models.generateContent({
+                    model: modelId,
+                    contents: prompt + "\n\nOutput strictly valid JSON.",
+                    config: { responseMimeType: 'application/json' }
+                 });
+                 return looseResponse.text;
+             }
+             throw innerError;
+          }
       });
   }
 
   /**
    * Smart Execution Strategy:
-   * 1. Iterates through attempts.
-   * 2. If 404 (Model Not Found) -> Switches to next Model in list.
-   * 3. If 429 (Quota) -> Switches to next API Key.
-   * 4. If other error -> Retries with backoff.
+   * - 404 (Not Found) -> Change MODEL
+   * - 429 (Quota) -> Change KEY
+   * - 403 (Auth) -> Change KEY
    */
   private async executeWithSmartRetry(
       operation: (apiKey: string, modelId: string) => Promise<string | undefined>
   ): Promise<Partial<Opportunity>> {
       
       let lastError: any;
-      const MAX_TOTAL_ATTEMPTS = 8; // Allow enough tries for model switching AND key rotation
-      let currentModelIndex = 0;
-
+      const MAX_TOTAL_ATTEMPTS = 12; 
+      
+      let modelIndex = 0;
+      
       for (let attempt = 1; attempt <= MAX_TOTAL_ATTEMPTS; attempt++) {
-          // Get current key (rotates only on specific triggers or natural round-robin if desired, 
-          // here we assume getNextKey() gives us the current one to use)
+          if (this.apiKeys.length === 0) throw new Error("No API keys available.");
+
           const apiKey = this.apiKeys[this.currentKeyIndex]; 
-          const modelId = this.MODELS[currentModelIndex];
+          const modelId = this.MODELS[modelIndex];
 
           try {
               const text = await operation(apiKey, modelId);
@@ -144,35 +151,52 @@ export class AiAgentService {
           } catch (error: any) {
               lastError = error;
               const msg = error.message?.toLowerCase() || '';
-              const isQuota = error.status === 429 || msg.includes('429') || msg.includes('quota') || msg.includes('exhausted');
-              const isModelError = error.status === 404 || msg.includes('404') || msg.includes('not found') || msg.includes('unsupported');
+              const status = error.status || 0;
 
-              console.warn(`AiAgent Attempt ${attempt} failed | Key: ...${apiKey.slice(-4)} | Model: ${modelId} | Error: ${msg}`);
+              // Error Classification
+              const isQuota = status === 429 || msg.includes('429') || msg.includes('quota') || msg.includes('exhausted');
+              const isModelError = status === 404 || msg.includes('404') || msg.includes('not found') || msg.includes('unsupported');
+              const isAuthError = status === 403 || msg.includes('key') || msg.includes('permission');
+
+              console.warn(`[AiAgent] Attempt ${attempt} Failed. Key:...${apiKey.slice(-4)} | Model:${modelId} | Error:${msg}`);
 
               if (attempt === MAX_TOTAL_ATTEMPTS) break;
 
               if (isModelError) {
-                  // Strategy: Try next model
-                  console.warn(`-> Model ${modelId} failed. Switching model.`);
-                  currentModelIndex = (currentModelIndex + 1) % this.MODELS.length;
-                  // Don't sleep long for 404s, just try next config
-                  await new Promise(r => setTimeout(r, 500));
-              } else if (isQuota) {
-                  // Strategy: Rotate Key
-                  console.warn(`-> Quota exceeded. Rotating API Key.`);
-                  this.getNextKey(); // Advances index
-                  // Exponential backoff
-                  const backoff = Math.min(1000 * Math.pow(2, attempt), 8000);
-                  await new Promise(r => setTimeout(r, backoff));
-              } else {
-                  // Strategy: Transient error, wait and retry (maybe rotate key too just in case)
-                  this.getNextKey(); 
-                  await new Promise(r => setTimeout(r, 2000));
+                  // Strategy: Model is broken/missing. Try NEXT MODEL. Keep key.
+                  modelIndex = (modelIndex + 1) % this.MODELS.length;
+                  // If we cycled back to start, trigger a key rotation just in case
+                  if (modelIndex === 0) this.rotateKey();
+                  await this.delay(500);
+              } 
+              else if (isQuota) {
+                  // Strategy: Key is exhausted. Try NEXT KEY. Keep model.
+                  this.rotateKey();
+                  await this.delay(1000 * Math.pow(1.5, attempt)); // Backoff
+              } 
+              else if (isAuthError) {
+                  // Strategy: Key is invalid. Try NEXT KEY.
+                  this.rotateKey();
+                  await this.delay(500);
+              }
+              else {
+                  // Strategy: Unknown error. Change BOTH.
+                  modelIndex = (modelIndex + 1) % this.MODELS.length;
+                  this.rotateKey();
+                  await this.delay(2000);
               }
           }
       }
 
-      throw lastError || new Error("Failed to extract opportunity after multiple attempts. All keys/models may be exhausted.");
+      throw lastError || new Error("Failed to extract opportunity after multiple attempts.");
+  }
+
+  private rotateKey() {
+      this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length;
+  }
+
+  private delay(ms: number) {
+      return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   private augmentData(parsed: any, model: string): Partial<Opportunity> {

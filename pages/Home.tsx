@@ -62,7 +62,7 @@ const Home: React.FC = () => {
   );
 
   // Reusable Filter Button Component
-  const FilterButton = ({ label, isActive, onClick }: { label: string, isActive: boolean, onClick: () => void }) => (
+  const FilterButton: React.FC<{ label: string, isActive: boolean, onClick: () => void }> = ({ label, isActive, onClick }) => (
     <button
       onClick={onClick}
       className={`px-4 py-2 text-sm font-medium rounded-md transition-colors border ${
