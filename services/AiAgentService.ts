@@ -98,15 +98,16 @@ export class AiAgentService {
       console.log(`❌ Marked key ...${key.slice(-4)} as failed (failures: ${currentFailures + 1})`);
   }
 
-  // ===== RAW API CALL (NO SDK) =====
+  // ===== RAW API CALL (v1beta REQUIRED for Tools) =====
   private async callGeminiAPI(
     apiKey: string,
     prompt: string,
     useGrounding: boolean = true
   ): Promise<any> {
-      // Use v1 endpoint (NOT v1beta)
-      const model = "gemini-1.5-flash-latest";
-      const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`;
+      // CRITICAL: Must use v1beta for 'tools' support
+      // CRITICAL: Use 'gemini-1.5-flash' (canonical name)
+      const model = "gemini-1.5-flash";
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       
       const requestBody: any = {
           contents: [{
@@ -115,10 +116,10 @@ export class AiAgentService {
           }]
       };
       
-      // Add grounding if requested
+      // Add grounding using v1beta syntax
       if (useGrounding) {
           requestBody.tools = [{
-              googleSearchRetrieval: {}
+              googleSearch: {} 
           }];
       }
       
