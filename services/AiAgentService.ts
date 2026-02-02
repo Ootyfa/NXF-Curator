@@ -1,4 +1,3 @@
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import { Opportunity } from "../types";
 
 export type SearchDomain = 'Film' | 'Visual Arts' | 'Music' | 'Literature' | 'Performing Arts' | 'Surprise Me';
@@ -99,39 +98,44 @@ export class AiAgentService {
       console.log(`❌ Marked key ...${key.slice(-4)} as failed (failures: ${currentFailures + 1})`);
   }
 
-  // ===== CORRECT SDK USAGE =====
-  private async executeGeminiRequest(
+  // ===== RAW API CALL (NO SDK) =====
+  private async callGeminiAPI(
     apiKey: string,
     prompt: string,
     useGrounding: boolean = true
   ): Promise<any> {
-      const genAI = new GoogleGenerativeAI(apiKey);
+      // Use v1 endpoint (NOT v1beta)
+      const model = "gemini-1.5-flash-latest";
+      const url = `https://generativelanguage.googleapis.com/v1/models/${model}:generateContent?key=${apiKey}`;
       
-      // Use the correct, stable model name
-      const model = genAI.getGenerativeModel({ 
-          model: "gemini-1.5-flash-8b"  // This model EXISTS and is STABLE
+      const requestBody: any = {
+          contents: [{
+              role: "user",
+              parts: [{ text: prompt }]
+          }]
+      };
+      
+      // Add grounding if requested
+      if (useGrounding) {
+          requestBody.tools = [{
+              googleSearchRetrieval: {}
+          }];
+      }
+      
+      const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+              'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(requestBody)
       });
       
-      if (useGrounding) {
-          // Use search grounding
-          const result = await model.generateContent({
-              contents: [{ role: "user", parts: [{ text: prompt }] }],
-              tools: [{
-                  googleSearchRetrieval: {
-                      dynamicRetrievalConfig: {
-                          mode: "MODE_DYNAMIC",
-                          dynamicThreshold: 0.3
-                      }
-                  }
-              }]
-          });
-          
-          return result.response;
-      } else {
-          // Simple generation without grounding
-          const result = await model.generateContent(prompt);
-          return result.response;
+      if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(`API Error ${response.status}: ${errorText}`);
       }
+      
+      return await response.json();
   }
 
   private async executeWithRetry(
@@ -161,7 +165,7 @@ export class AiAgentService {
               await this.enforceRateLimit(logCallback);
               logCallback(`🚀 Attempt ${attempt}/${maxAttempts}...`);
               
-              const result = await this.executeGeminiRequest(apiKey, prompt, useGrounding);
+              const result = await this.callGeminiAPI(apiKey, prompt, useGrounding);
               
               // Success!
               this.keyFailureCount.set(apiKey, 0);
@@ -206,6 +210,35 @@ export class AiAgentService {
       }
   }
 
+  private extractTextFromResponse(response: any): string {
+      try {
+          if (response.candidates && response.candidates[0]?.content?.parts) {
+              const parts = response.candidates[0].content.parts;
+              return parts.map((p: any) => p.text || '').join('');
+          }
+          return '';
+      } catch {
+          return '';
+      }
+  }
+
+  private extractGroundingSources(response: any): Set<string> {
+      const urls = new Set<string>();
+      try {
+          const metadata = response.candidates?.[0]?.groundingMetadata;
+          if (metadata?.groundingChunks) {
+              metadata.groundingChunks.forEach((chunk: any) => {
+                  if (chunk.web?.uri) {
+                      urls.add(chunk.web.uri);
+                  }
+              });
+          }
+      } catch (e) {
+          console.warn('Could not extract grounding sources:', e);
+      }
+      return urls;
+  }
+
   // ===== MAIN DISCOVERY FUNCTION =====
   async scanWeb(logCallback: (msg: string) => void, domain: SearchDomain): Promise<Opportunity[]> {
     const TODAY_STR = new Date().toLocaleDateString("en-US", { year: 'numeric', month: 'long', day: 'numeric' });
@@ -230,7 +263,7 @@ IGNORE:
 - Past deadlines (before ${TODAY_STR})
 - Opportunities not open to Indians
 
-Return ONLY valid JSON array:
+Return ONLY valid JSON array (no markdown, no explanation):
 [{
   "title": "Full opportunity name",
   "organizer": "Organization name",
@@ -247,34 +280,26 @@ Return ONLY valid JSON array:
         logCallback("✅ Data received. Processing...");
 
         // Extract grounding sources
-        const groundingMetadata = (response as any).groundingMetadata;
-        const verifiedUrls = new Set<string>();
+        const verifiedUrls = this.extractGroundingSources(response);
         
-        if (groundingMetadata?.groundingChunks) {
-            groundingMetadata.groundingChunks.forEach((chunk: any) => {
-                if (chunk.web?.uri) {
-                    verifiedUrls.add(chunk.web.uri);
-                }
-            });
+        // Extract text
+        const text = this.extractTextFromResponse(response);
+        
+        if (!text) {
+            throw new Error('No text content in response');
         }
 
-        // Parse response text
-        let text = '';
-        if (response.text) {
-            text = response.text();
-        } else if (response.candidates?.[0]?.content?.parts?.[0]?.text) {
-            text = response.candidates[0].content.parts[0].text;
-        }
-
+        // Parse JSON
         let rawData: any[] = [];
         try {
-            // Try direct parse
             rawData = JSON.parse(text);
         } catch {
             // Try to extract JSON from markdown
-            const match = text.match(/```json\n([\s\S]*?)\n```/) || text.match(/\[\s*\{[\s\S]*\}\s*\]/);
+            const match = text.match(/```json\s*([\s\S]*?)\s*```/) || text.match(/\[\s*\{[\s\S]*\}\s*\]/);
             if (match) {
                 rawData = JSON.parse(match[1] || match[0]);
+            } else {
+                throw new Error('Could not parse JSON from response');
             }
         }
 
@@ -318,7 +343,7 @@ Return ONLY valid JSON array:
                 status: 'draft',
                 createdAt: new Date().toISOString(),
                 aiMetadata: {
-                    model: 'Gemini-1.5-Flash-8B',
+                    model: 'Gemini-1.5-Flash',
                     discoveryQuery: searchStrategy,
                     discoveryDate: new Date().toISOString()
                 }
@@ -340,7 +365,7 @@ Return ONLY valid JSON array:
     
     const prompt = `Analyze this webpage: ${url}
 
-Extract opportunity information and return JSON:
+Extract opportunity information and return ONLY JSON (no markdown, no explanation):
 {
   "title": "Opportunity name",
   "organizer": "Organization",
@@ -353,11 +378,10 @@ Extract opportunity information and return JSON:
     try {
         const response = await this.executeWithRetry(prompt, logCallback, true);
         
-        let text = '';
-        if (response.text) {
-            text = response.text();
-        } else if (response.candidates?.[0]?.content?.parts?.[0]?.text) {
-            text = response.candidates[0].content.parts[0].text;
+        const text = this.extractTextFromResponse(response);
+        
+        if (!text) {
+            throw new Error('No text content in response');
         }
 
         let data: any = {};
@@ -369,8 +393,12 @@ Extract opportunity information and return JSON:
         }
         
         if (!data.title) {
-            const urlObj = new URL(url);
-            data.title = urlObj.pathname.split('/').pop()?.replace(/-/g, ' ') || "Untitled";
+            try {
+                const urlObj = new URL(url);
+                data.title = urlObj.pathname.split('/').pop()?.replace(/-/g, ' ') || "Untitled";
+            } catch {
+                data.title = "Untitled";
+            }
         }
 
         return [{
@@ -393,7 +421,7 @@ Extract opportunity information and return JSON:
             aiConfidenceScore: 80,
             aiReasoning: "Direct URL analysis",
             aiMetadata: { 
-                model: 'Gemini-1.5-Flash-8B',
+                model: 'Gemini-1.5-Flash',
                 discoveryQuery: url, 
                 discoveryDate: new Date().toISOString() 
             }
