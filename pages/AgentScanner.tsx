@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { Lock, Sparkles, Save, RefreshCw, CheckCircle, ArrowRight, Clipboard, Database, ShieldAlert, Activity } from 'lucide-react';
+import { Lock, Sparkles, Save, RefreshCw, CheckCircle, ArrowRight, Clipboard, Database, ShieldAlert, Activity, Globe, Search } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { aiAgentService } from '../services/AiAgentService';
 import { opportunityService } from '../services/OpportunityService';
+import { webScraperService } from '../services/WebScraperService';
+import { supabase } from '../services/supabase';
 import { Opportunity } from '../types';
 import Button from '../components/Button';
 
@@ -12,10 +14,16 @@ const AgentScanner: React.FC = () => {
   const [authEmail, setAuthEmail] = useState('');
   const [authPass, setAuthPass] = useState('');
   const [authError, setAuthError] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   // Workflow State
+  const [inputMode, setInputMode] = useState<'text' | 'url'>('text');
+  const [urlInput, setUrlInput] = useState('');
   const [rawText, setRawText] = useState('');
+  
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isFetchingUrl, setIsFetchingUrl] = useState(false);
+  
   const [extractedData, setExtractedData] = useState<Partial<Opportunity> | null>(null);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const [statusMsg, setStatusMsg] = useState('');
@@ -24,21 +32,70 @@ const AgentScanner: React.FC = () => {
   const [debugInfo, setDebugInfo] = useState<any>(null);
 
   useEffect(() => {
-    const token = sessionStorage.getItem('nxf_curator_token');
-    if (token === 'verified') {
+    // Check if we have an active Supabase session
+    checkSession();
+  }, []);
+
+  const checkSession = async () => {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session) {
         setIsAuthenticated(true);
         setDebugInfo(aiAgentService.getDebugInfo());
     }
-  }, [isAuthenticated]);
+  };
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (authEmail === 'nxfindiax@gmail.com' && authPass === 'Ooty2026!"§') {
+    setAuthError('');
+    setIsLoggingIn(true);
+
+    try {
+      // REAL SUPABASE LOGIN
+      // This is required to bypass RLS policies on the 'opportunities' table.
+      // Simply checking the string locally is not enough for database write permissions.
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: authEmail,
+        password: authPass,
+      });
+
+      if (error) {
+        throw error;
+      }
+
       setIsAuthenticated(true);
-      sessionStorage.setItem('nxf_curator_token', 'verified');
-    } else {
-      setAuthError('Invalid credentials');
+      setDebugInfo(aiAgentService.getDebugInfo());
+    } catch (err: any) {
+      console.error("Login failed:", err);
+      // Fallback: If user enters the hardcoded dev credentials but they don't exist in Supabase yet,
+      // warn them.
+      if (authEmail === 'nxfindiax@gmail.com' && authPass === 'Ooty2026!"§') {
+         setAuthError('Credentials match dev keys, but Supabase Auth failed. Ensure this user exists in your Supabase Auth Users list.');
+      } else {
+         setAuthError(err.message || 'Authentication failed');
+      }
+    } finally {
+      setIsLoggingIn(false);
     }
+  };
+
+  const handleFetchUrl = async () => {
+      if (!urlInput) return;
+      setIsFetchingUrl(true);
+      setStatusMsg('');
+      setSaveStatus('idle');
+      
+      try {
+          const content = await webScraperService.fetchUrlContent(urlInput);
+          setRawText(content);
+          // Auto switch to text view to show result
+          // setInputMode('text'); 
+          setStatusMsg('Website content fetched successfully! Click "Extract" to process.');
+      } catch (e: any) {
+          setStatusMsg(e.message);
+          setSaveStatus('error');
+      } finally {
+          setIsFetchingUrl(false);
+      }
   };
 
   const processText = async () => {
@@ -49,7 +106,18 @@ const AgentScanner: React.FC = () => {
     setStatusMsg('');
     
     try {
-      const data = await aiAgentService.extractOpportunityFromText(rawText);
+      // If we scraped a URL, pass that context to the AI
+      const contextPrefix = urlInput ? `SOURCE URL: ${urlInput}\n\n` : '';
+      const data = await aiAgentService.extractOpportunityFromText(contextPrefix + rawText);
+      
+      // If URL was used, ensure it's in the data
+      if (urlInput && !data.contact?.website) {
+          data.contact = { ...data.contact, website: urlInput } as any;
+      }
+      if (urlInput) {
+          data.sourceUrl = urlInput;
+      }
+
       setExtractedData(data);
     } catch (e: any) {
       console.error(e);
@@ -78,6 +146,7 @@ const AgentScanner: React.FC = () => {
              setSaveStatus('idle');
              setExtractedData(null);
              setRawText('');
+             setUrlInput('');
              setStatusMsg('');
         }, 2000);
       } else {
@@ -100,25 +169,27 @@ const AgentScanner: React.FC = () => {
                  <Lock className="text-primary" size={32} />
              </div>
              <h1 className="text-xl font-bold text-white">Curator Access</h1>
-             <p className="text-gray-400 text-sm mt-1">NXF Internal Tools</p>
+             <p className="text-gray-400 text-sm mt-1">Login to enable Database Write Access</p>
           </div>
           <form onSubmit={handleLogin} className="p-8 space-y-6">
-             {authError && <div className="text-red-400 text-sm text-center">{authError}</div>}
+             {authError && <div className="text-red-400 text-sm text-center bg-red-900/30 p-2 rounded">{authError}</div>}
              <input 
                 type="email" 
-                placeholder="Curator ID" 
+                placeholder="Email Address" 
                 value={authEmail}
                 onChange={e => setAuthEmail(e.target.value)}
                 className="w-full bg-gray-900 border border-gray-600 text-white rounded p-3 focus:border-primary focus:outline-none"
              />
              <input 
                 type="password" 
-                placeholder="Passkey" 
+                placeholder="Password" 
                 value={authPass}
                 onChange={e => setAuthPass(e.target.value)}
                 className="w-full bg-gray-900 border border-gray-600 text-white rounded p-3 focus:border-primary focus:outline-none"
              />
-             <Button type="submit" fullWidth className="py-3 font-bold">Authenticate</Button>
+             <Button type="submit" fullWidth className="py-3 font-bold" disabled={isLoggingIn}>
+                {isLoggingIn ? 'Authenticating...' : 'Authenticate'}
+             </Button>
           </form>
           <div className="p-4 text-center bg-gray-900">
               <Link to="/" className="text-gray-500 text-sm hover:text-white">Return to Home</Link>
@@ -140,7 +211,7 @@ const AgentScanner: React.FC = () => {
          </div>
          <div className="flex items-center gap-4">
              <Link to="/" className="text-sm font-medium text-gray-500 hover:text-primary">View Live Site</Link>
-             <button onClick={() => { setIsAuthenticated(false); sessionStorage.removeItem('nxf_curator_token'); }} className="text-sm text-red-500 font-medium">Logout</button>
+             <button onClick={async () => { await supabase.auth.signOut(); setIsAuthenticated(false); }} className="text-sm text-red-500 font-medium">Logout</button>
          </div>
       </div>
 
@@ -148,41 +219,81 @@ const AgentScanner: React.FC = () => {
           
           {/* LEFT: INPUT AREA */}
           <div className="flex flex-col bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden h-full">
-              <div className="p-4 border-b border-gray-100 bg-gray-50 flex justify-between items-center">
-                  <h2 className="font-bold text-gray-700 flex items-center">
-                      <Clipboard size={18} className="mr-2" /> 1. Paste Raw Text
-                  </h2>
+              
+              {/* Tabs */}
+              <div className="flex border-b border-gray-200">
                   <button 
-                    onClick={() => setRawText('')}
-                    className="text-xs text-gray-400 hover:text-red-500"
+                    onClick={() => setInputMode('text')}
+                    className={`flex-1 py-3 text-sm font-medium flex items-center justify-center ${inputMode === 'text' ? 'bg-white text-primary border-b-2 border-primary' : 'bg-gray-50 text-gray-500'}`}
                   >
-                    Clear
+                      <Clipboard size={16} className="mr-2" /> Paste Text
+                  </button>
+                  <button 
+                    onClick={() => setInputMode('url')}
+                    className={`flex-1 py-3 text-sm font-medium flex items-center justify-center ${inputMode === 'url' ? 'bg-white text-primary border-b-2 border-primary' : 'bg-gray-50 text-gray-500'}`}
+                  >
+                      <Globe size={16} className="mr-2" /> Fetch URL
                   </button>
               </div>
-              
+
+              {/* Status Bar */}
               <div className="bg-blue-50 p-2 text-xs text-blue-800 border-b border-blue-100 flex items-center justify-between">
                   <span className="flex items-center"><Activity size={12} className="mr-1"/> System Status:</span>
                   {debugInfo && (
                       <span className="font-mono">
-                          Groq: {debugInfo.groqStatus} | Google: {debugInfo.googleKeys > 0 ? 'Ready' : 'Missing Key'}
+                          Groq: {debugInfo.groqStatus} | Auth: Verified
                       </span>
                   )}
-                  <button onClick={() => window.location.reload()} className="hover:underline">Reload</button>
               </div>
               
-              <textarea 
-                  className="flex-grow p-4 resize-none focus:outline-none text-sm font-mono text-gray-600 leading-relaxed"
-                  placeholder="Paste website content, email text, or raw grant details here..."
-                  value={rawText}
-                  onChange={(e) => setRawText(e.target.value)}
-              />
+              {/* Input Area */}
+              <div className="flex-grow flex flex-col p-4 overflow-hidden relative">
+                  
+                  {inputMode === 'url' && (
+                      <div className="mb-4 space-y-2">
+                          <label className="text-xs font-bold text-gray-500 uppercase">Target URL</label>
+                          <div className="flex gap-2">
+                              <input 
+                                type="text" 
+                                placeholder="https://example.com/grant-details" 
+                                className="flex-grow p-2 border border-gray-300 rounded text-sm focus:border-primary outline-none"
+                                value={urlInput}
+                                onChange={(e) => setUrlInput(e.target.value)}
+                              />
+                              <Button onClick={handleFetchUrl} disabled={!urlInput || isFetchingUrl} variant="secondary">
+                                  {isFetchingUrl ? <RefreshCw className="animate-spin" size={18} /> : <Search size={18} />}
+                              </Button>
+                          </div>
+                          <p className="text-xs text-gray-400">
+                             Uses a proxy to fetch content. If it fails, copy the text manually.
+                          </p>
+                      </div>
+                  )}
 
-              {saveStatus === 'error' && statusMsg && (
-                   <div className="p-3 bg-red-100 border-t border-red-200 text-red-700 text-sm flex items-start">
-                       <ShieldAlert size={16} className="mr-2 mt-0.5 flex-shrink-0" />
-                       <span className="break-all">{statusMsg}</span>
-                   </div>
-              )}
+                  <label className="text-xs font-bold text-gray-500 uppercase mb-2">
+                      {inputMode === 'url' ? 'Scraped Content' : 'Raw Content'}
+                  </label>
+                  <textarea 
+                      className="flex-grow p-3 border border-gray-200 rounded resize-none focus:outline-none text-sm font-mono text-gray-600 leading-relaxed bg-gray-50"
+                      placeholder={inputMode === 'url' ? "Content will appear here after fetching..." : "Paste website content, email text, or raw grant details here..."}
+                      value={rawText}
+                      onChange={(e) => setRawText(e.target.value)}
+                  />
+
+                  {saveStatus === 'error' && statusMsg && (
+                      <div className="mt-3 p-3 bg-red-100 border-t border-red-200 text-red-700 text-sm flex items-start rounded">
+                          <ShieldAlert size={16} className="mr-2 mt-0.5 flex-shrink-0" />
+                          <span className="break-all">{statusMsg}</span>
+                      </div>
+                  )}
+
+                  {inputMode === 'url' && statusMsg && saveStatus !== 'error' && (
+                       <div className="mt-3 p-3 bg-green-100 text-green-700 text-sm flex items-center rounded">
+                           <CheckCircle size={16} className="mr-2" /> {statusMsg}
+                       </div>
+                  )}
+
+              </div>
 
               <div className="p-4 border-t border-gray-100 bg-gray-50">
                   <Button 
