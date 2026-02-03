@@ -7,15 +7,27 @@ interface AgentLog {
   type: 'info' | 'success' | 'error' | 'action';
 }
 
+// Reliable Indian Opportunity Sources to use when AI Search fails
+const BACKUP_SOURCES = [
+    "https://www.inlaksfoundation.org/opportunities/",
+    "https://khojstudios.org/opportunities/",
+    "https://filmfreeway.com/festivals/curated?tags=india",
+    "https://www.goathe.in/grants",
+    "https://serendipityarts.org/grants",
+    "https://keralaculture.org/opportunities",
+    "https://www.indiaifa.org/grants-projects",
+    "https://www.tata.com/community/commitments/arts-culture"
+];
+
 export class AiAgentService {
   private googleKeys: string[] = [];
   private currentKeyIndex = 0;
   private client: GoogleGenAI | null = null;
   
   // Model Configuration
-  // Using gemini-2.0-flash which is stable and supports search grounding
-  private readonly SEARCH_MODEL = "gemini-2.0-flash"; 
-  private readonly EXTRACTION_MODEL = "gemini-2.0-flash";
+  // gemini-2.0-flash-exp is currently the reliable preview model for Search Grounding
+  private readonly SEARCH_MODEL = "gemini-2.0-flash-exp"; 
+  private readonly EXTRACTION_MODEL = "gemini-2.0-flash-exp";
 
   constructor() {
     this.reloadKeys();
@@ -58,7 +70,7 @@ export class AiAgentService {
       return {
           googleKeys: this.googleKeys.length,
           currentKeyIdx: this.currentKeyIndex,
-          activeModel: this.EXTRACTION_MODEL
+          activeModel: this.SEARCH_MODEL
       };
   }
 
@@ -79,14 +91,14 @@ export class AiAgentService {
 
   /**
    * Uses Google Search Grounding to find REAL URLs.
-   * Falls back to prediction if search fails.
+   * Falls back to HARDCODED SOURCES if search fails.
    */
-  async discoverUrlsForTopic(topic: string): Promise<string[]> {
+  async discoverUrlsForTopic(topic: string): Promise<{ urls: string[], source: 'live' | 'backup' }> {
       if (!this.client) throw new Error("No API Keys available");
       this.rotateKey();
 
       try {
-        // Use Google Search Tool to get actual URLs
+        // Attempt 1: Live Google Search
         const response = await this.client.models.generateContent({
             model: this.SEARCH_MODEL,
             contents: `Find 5 specific, official URLs that list ${topic}. Do not give me general homepages, give me the pages with the lists or application details.`,
@@ -95,48 +107,35 @@ export class AiAgentService {
             }
         });
 
-        // Extract URLs from Grounding Metadata
         const urls = new Set<string>();
         
-        // Method 1: Grounding Chunks
+        // Extract from Grounding
         const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
         chunks.forEach((chunk: any) => {
             if (chunk.web?.uri) urls.add(chunk.web.uri);
         });
 
-        // Method 2: Fallback text parsing if tool fails but returns text with links
-        if (urls.size === 0 && response.text) {
+        // Extract from Text
+        if (response.text) {
              const urlRegex = /(https?:\/\/[^\s]+)/g;
              const matches = response.text.match(urlRegex);
              if (matches) matches.forEach(m => urls.add(m));
         }
-        
-        // Method 3: Fallback to Hallucination/Prediction if Search Tool returned nothing useful
-        if (urls.size === 0) {
-             console.log("Search grounding empty, falling back to prediction.");
-             const predicted = await this.hallucinateUrls(topic);
-             predicted.forEach(u => urls.add(u));
-        }
 
-        return Array.from(urls).filter(u => !u.includes('google.com') && !u.includes('youtube.com'));
+        const validUrls = Array.from(urls).filter(u => !u.includes('google.com') && !u.includes('youtube.com'));
+
+        if (validUrls.length > 0) {
+            return { urls: validUrls, source: 'live' };
+        }
+        
+        console.warn("Search returned 0 valid URLs. Using backup sources.");
+        throw new Error("Empty search results");
 
       } catch (e) {
-        console.error("Discovery Error, failing over to prediction", e);
-        return this.hallucinateUrls(topic);
-      }
-  }
-
-  async hallucinateUrls(topic: string): Promise<string[]> {
-      try {
-        const response = await this.client?.models.generateContent({
-            model: this.EXTRACTION_MODEL,
-            contents: `Predict 3-5 reliable URLs where I can find "${topic}". Return ONLY a JSON object: { "urls": ["url1", "url2"] }`,
-            config: { responseMimeType: "application/json" }
-        });
-        const json = JSON.parse(response?.text || "{}");
-        return json.urls || [];
-      } catch {
-          return [];
+        // Fallback: Use backup sources mixed with hallucination attempts
+        // We return a random subset of backup sources to keep the crawler moving
+        const shuffled = BACKUP_SOURCES.sort(() => 0.5 - Math.random()).slice(0, 2);
+        return { urls: shuffled, source: 'backup' };
       }
   }
 
@@ -156,7 +155,7 @@ export class AiAgentService {
              return [];
           }
 
-          onLog({ message: `Analyzing ${content.length} chars...`, type: 'info' });
+          onLog({ message: `Analyzing ${content.length} chars with ${this.EXTRACTION_MODEL}...`, type: 'info' });
           
           // Bulk Extraction Prompt
           const prompt = `

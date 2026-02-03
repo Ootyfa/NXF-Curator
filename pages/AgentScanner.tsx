@@ -145,7 +145,7 @@ const AgentScanner: React.FC = () => {
       setLogs([]);
       setFoundItems([]);
       addLog("Starting Autonomous Crawler...", 'action');
-      addLog("Mode: Search Grounding + Bulk Extraction", 'info');
+      addLog("Using Gemini 2.0 Flash Exp + Search Grounding", 'info');
 
       try {
           while (!stopSignalRef.current) {
@@ -157,14 +157,13 @@ const AgentScanner: React.FC = () => {
                   if (stopSignalRef.current) break;
                   
                   addLog(`Searching: "${topic}"`, 'action');
-                  const urls = await aiAgentService.discoverUrlsForTopic(topic);
+                  const { urls, source } = await aiAgentService.discoverUrlsForTopic(topic);
                   
-                  if (urls.length === 0) {
-                      addLog("No valid URLs found from Search Grounding.", 'error');
-                      continue;
+                  if (source === 'backup') {
+                      addLog("Live search failed/limited. Using reliable BACKUP sources.", 'error');
+                  } else {
+                      addLog(`Found ${urls.length} LIVE URLs via Google.`, 'info');
                   }
-
-                  addLog(`Found ${urls.length} target URLs via Google.`, 'info');
 
                   for (const url of urls) {
                       if (stopSignalRef.current) break;
