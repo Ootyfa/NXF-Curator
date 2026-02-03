@@ -14,7 +14,7 @@ export class AiAgentService {
   async parseOpportunityText(rawText: string, sourceUrl: string = ""): Promise<Partial<Opportunity>> {
       if (!rawText || rawText.trim().length < 10) throw new Error("Content too short.");
 
-      // Truncate
+      // Truncate to avoid context limits
       const textToAnalyze = rawText.substring(0, 25000); 
 
       const prompt = `
@@ -44,7 +44,7 @@ export class AiAgentService {
           
           if (!data) throw new Error("Could not parse AI response.");
 
-          // Data Cleaning
+          // Data Cleaning & Formatting
           let deadlineDate = data.deadline;
           const d = new Date(deadlineDate);
           if (!deadlineDate || isNaN(d.getTime())) {
@@ -99,30 +99,43 @@ export class AiAgentService {
           onLog(`\n🔎 Searching: "${keyword}"...`);
           
           try {
-              // 2. Perform Search via DuckDuckGo Lite (HTML version is easier to parse)
-              const searchUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(keyword)}`;
               let searchHtml = "";
+              let baseUrl = "";
               
+              // ATTEMPT 1: DuckDuckGo HTML
               try {
-                  searchHtml = await webScraperService.fetchRaw(searchUrl);
+                 const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(keyword)}`;
+                 searchHtml = await webScraperService.fetchRaw(searchUrl);
+                 baseUrl = "https://html.duckduckgo.com";
               } catch (e) {
-                  onLog(`   ⚠️ Search Proxy Failed. Trying backup method...`);
-                  // Backup: Try fetching a different source if needed, or skip
-                  continue;
+                 // Ignore, try fallback
+              }
+
+              // ATTEMPT 2: Bing (Fallback)
+              if (!searchHtml || searchHtml.length < 500) {
+                 onLog(`   ⚠️ DDG failed, trying Bing...`);
+                 try {
+                    const searchUrl = `https://www.bing.com/search?q=${encodeURIComponent(keyword)}`;
+                    searchHtml = await webScraperService.fetchRaw(searchUrl);
+                    baseUrl = "https://www.bing.com";
+                 } catch (e) {
+                    onLog(`   ⚠️ All Search Engines blocked. Skipping keyword.`);
+                    continue;
+                 }
               }
 
               // 3. Extract Result Links
-              const links = webScraperService.extractLinks(searchHtml, "https://lite.duckduckgo.com");
+              const links = webScraperService.extractLinks(searchHtml, baseUrl);
               
-              // Filter garbage
-              const candidates = links.filter(l => l.length > 15).slice(0, 3);
+              // Filter to get quality links
+              const candidates = links.filter(l => l.length > 20).slice(0, 3);
 
               if (candidates.length === 0) {
-                 onLog("   ⚠️ No links extracted. Search engine might be blocking proxies.");
+                 onLog("   ⚠️ No relevant links extracted.");
                  continue;
               }
 
-              onLog(`   🔗 Found ${candidates.length} relevant links.`);
+              onLog(`   🔗 Found ${candidates.length} potential leads.`);
 
               // 4. Deep Scan Pages
               for (const url of candidates) {
@@ -132,13 +145,12 @@ export class AiAgentService {
                   onLog(`      🕵️ Analyzing: ${url.substring(0, 40)}...`);
                   
                   try {
-                      // Fetch cleaned text for analysis
                       const pageText = await webScraperService.fetchUrlContent(url);
                       
-                      // Pre-check relevance
+                      // Pre-check relevance to save AI tokens
                       const lower = pageText.toLowerCase();
-                      if (!lower.includes('grant') && !lower.includes('award') && !lower.includes('apply') && !lower.includes('submit')) {
-                          onLog(`      ⏩ Skipped (Content seems irrelevant)`);
+                      if (!lower.includes('grant') && !lower.includes('award') && !lower.includes('residency') && !lower.includes('submit')) {
+                          onLog(`      ⏩ Skipped (Content irrelevant)`);
                           continue;
                       }
 
@@ -148,13 +160,13 @@ export class AiAgentService {
                           foundOpportunities.push(opp as Opportunity);
                           onLog(`      ✨ SUCCESS: Found "${opp.title}"`);
                       } else {
-                          onLog(`      ⚠️ Analyzed but low confidence result.`);
+                          onLog(`      ⚠️ Analyzed but no valid opportunity found.`);
                       }
                   } catch (e: any) {
                       onLog(`      ❌ Analyze Failed: ${e.message}`);
                   }
                   
-                  await new Promise(r => setTimeout(r, 1000));
+                  await new Promise(r => setTimeout(r, 1500)); // Politeness delay
               }
 
           } catch (e: any) {
