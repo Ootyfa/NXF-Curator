@@ -1,3 +1,4 @@
+import { GoogleGenAI } from "@google/genai";
 import { Opportunity } from "../types";
 import { webScraperService } from "./WebScraperService";
 
@@ -8,11 +9,13 @@ interface AgentLog {
 
 export class AiAgentService {
   private googleKeys: string[] = [];
-  private groqKey: string = "";
-  private currentGoogleKeyIndex = 0;
+  private currentKeyIndex = 0;
+  private client: GoogleGenAI | null = null;
   
   // Model Configuration
-  private readonly GOOGLE_MODEL_ENDPOINT = "gemini-1.5-flash"; 
+  // Using gemini-2.0-flash which is stable and supports search grounding
+  private readonly SEARCH_MODEL = "gemini-2.0-flash"; 
+  private readonly EXTRACTION_MODEL = "gemini-2.0-flash";
 
   constructor() {
     this.reloadKeys();
@@ -21,9 +24,6 @@ export class AiAgentService {
   public reloadKeys() {
     try {
         const env = (import.meta as any).env || {};
-        this.groqKey = env.VITE_GROQ_API_KEY || "";
-        
-        // Load and split keys
         const potentialGoogleVars = [env.VITE_GOOGLE_API_KEY, env.GOOGLE_API_KEY];
         const foundKeys = new Set<string>();
         potentialGoogleVars.forEach(val => {
@@ -35,230 +35,210 @@ export class AiAgentService {
             }
         });
         this.googleKeys = Array.from(foundKeys);
+        this.initClient();
     } catch (e) {
         console.error("Failed to load keys", e);
     }
   }
 
+  private initClient() {
+    if (this.googleKeys.length > 0) {
+      this.client = new GoogleGenAI({ apiKey: this.googleKeys[this.currentKeyIndex] });
+    }
+  }
+
+  private rotateKey() {
+    if (this.googleKeys.length > 1) {
+      this.currentKeyIndex = (this.currentKeyIndex + 1) % this.googleKeys.length;
+      this.initClient();
+    }
+  }
+
   public getDebugInfo() {
       return {
-          groqStatus: this.groqKey ? 'Active' : 'Missing',
           googleKeys: this.googleKeys.length,
-          activeModel: this.GOOGLE_MODEL_ENDPOINT
+          currentKeyIdx: this.currentKeyIndex,
+          activeModel: this.EXTRACTION_MODEL
       };
   }
 
-  // ===== AUTOMATED AGENT METHODS =====
+  // ===== AUTONOMOUS AGENT METHODS =====
 
-  /**
-   * 1. Generates search queries/potential URLs based on a topic
-   * 2. Scrapes those URLs
-   * 3. Analyzes content to find opportunities
-   */
-  async scanWeb(topic: string, onLog?: (log: AgentLog) => void): Promise<Partial<Opportunity>[]> {
-      const log = (msg: string, type: 'info' | 'success' | 'error' | 'action' = 'info') => {
-          if (onLog) onLog({ message: msg, type });
-      };
-
-      log(`Initializing Agent for topic: "${topic}"...`, 'action');
-
-      // Step 1: Hallucinate/Predict likely URLs (Since we lack a real SERP API in this environment)
-      // In a real production app, this would call Google Custom Search API.
-      log("Agent is predicting likely data sources...", 'info');
-      
-      const prompt = `
-        You are an Opportunity Scout. based on the topic "${topic}", return a JSON list of 3-5 SPECIFIC, REAL URLs where lists of such opportunities are found.
-        Focus on official portals, reputable blogs, or aggregator sites.
-        Do not explain. Return ONLY JSON: { "urls": ["url1", "url2"] }
-      `;
-
-      let targetUrls: string[] = [];
-      try {
-          const jsonResponse = await this.callGeminiRest(prompt, true);
-          targetUrls = jsonResponse.urls || [];
-          log(`Identified ${targetUrls.length} potential sources.`, 'success');
-      } catch (e) {
-          log("Failed to generate target list. Using fallback.", 'error');
-          targetUrls = ['https://www.filmfreeway.com', 'https://www.withoutabox.com'];
-      }
-
-      const foundOpportunities: Partial<Opportunity>[] = [];
-
-      // Step 2: Iterate and Scrape
-      for (const url of targetUrls) {
-          log(`Visiting: ${url}`, 'action');
-          try {
-              const content = await webScraperService.fetchUrlContent(url);
-              if (content.length < 500) {
-                  log(`Skipping ${url} (Insufficient content)`, 'error');
-                  continue;
-              }
-
-              log(`Scraped ${content.length} chars. Analyzing with AI...`, 'info');
-              
-              // Analyze specific page
-              const opportunity = await this.extractOpportunityFromText(content, url);
-              
-              // Validate minimal viability
-              if (opportunity.title && opportunity.title !== "Untitled") {
-                  foundOpportunities.push(opportunity);
-                  log(`Found: ${opportunity.title}`, 'success');
-              } else {
-                  log(`No structured opportunity found at ${url}`, 'info');
-              }
-              
-          } catch (err: any) {
-              log(`Failed to process ${url}: ${err.message}`, 'error');
-          }
-      }
-
-      log(`Scan complete. Found ${foundOpportunities.length} opportunities.`, 'success');
-      return foundOpportunities;
+  async generateSearchTopics(): Promise<string[]> {
+      const topics = [
+        "Film grants for Indian filmmakers 2025 apply now",
+        "Visual arts residencies in India deadline 2025",
+        "Theatre funding organizations India application",
+        "Documentary fellowships India 2025 open call",
+        "Music production grants India 2025",
+        "Photography awards India 2025 submission",
+        "Screenwriting labs India 2025"
+      ];
+      return topics.sort(() => 0.5 - Math.random()).slice(0, 3);
   }
 
   /**
-   * Direct URL Analysis
+   * Uses Google Search Grounding to find REAL URLs.
+   * Falls back to prediction if search fails.
    */
-  async analyzeSpecificUrl(url: string): Promise<Partial<Opportunity>> {
+  async discoverUrlsForTopic(topic: string): Promise<string[]> {
+      if (!this.client) throw new Error("No API Keys available");
+      this.rotateKey();
+
       try {
-          const content = await webScraperService.fetchUrlContent(url);
-          return await this.extractOpportunityFromText(content, url);
-      } catch (e: any) {
-          console.error("Analysis Failed", e);
-          throw e;
-      }
-  }
+        // Use Google Search Tool to get actual URLs
+        const response = await this.client.models.generateContent({
+            model: this.SEARCH_MODEL,
+            contents: `Find 5 specific, official URLs that list ${topic}. Do not give me general homepages, give me the pages with the lists or application details.`,
+            config: {
+                tools: [{ googleSearch: {} }]
+            }
+        });
 
-  // ===== CORE EXTRACTION =====
-
-  async extractOpportunityFromText(rawText: string, sourceUrl?: string): Promise<Partial<Opportunity>> {
-      const prompt = this.buildPrompt(rawText);
-      let data: any = {};
-
-      // Try Groq first (Fastest/Cheapest)
-      if (this.groqKey) {
-          try {
-              data = await this.callGroq(prompt);
-          } catch (e) {
-              console.warn("Groq failed, failing over to Gemini REST.", e);
-          }
-      }
-
-      // Fallback to Gemini REST
-      if (Object.keys(data).length === 0 && this.googleKeys.length > 0) {
-          data = await this.callGeminiRest(prompt, true);
-      }
-
-      if (Object.keys(data).length === 0) {
-          throw new Error("All AI models failed to extract data.");
-      }
-
-      return this.augmentData(data, "AI Agent", sourceUrl);
-  }
-
-  // ===== REST API IMPLEMENTATIONS =====
-
-  /**
-   * Calls Google Gemini via standard Fetch API (v1beta)
-   * This bypasses the SDK to give us raw control over the request/response and avoids SDK dependency issues.
-   */
-  private async callGeminiRest(promptText: string, expectJson: boolean): Promise<any> {
-      // 1. Get Key
-      if (this.googleKeys.length === 0) throw new Error("No Google API Keys available.");
-      const apiKey = this.googleKeys[this.currentGoogleKeyIndex];
-      this.currentGoogleKeyIndex = (this.currentGoogleKeyIndex + 1) % this.googleKeys.length;
-
-      // 2. Prepare Endpoint
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.GOOGLE_MODEL_ENDPOINT}:generateContent?key=${apiKey}`;
-
-      // 3. Prepare Body
-      const body = {
-          contents: [{
-              parts: [{ text: promptText }]
-          }],
-          generationConfig: {
-              temperature: 0.1,
-              // Force JSON mode if requested
-              responseMimeType: expectJson ? "application/json" : "text/plain" 
-          }
-      };
-
-      // 4. Fetch
-      const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body)
-      });
-
-      if (!response.ok) {
-          const errData = await response.json().catch(() => ({}));
-          throw new Error(`Gemini API Error ${response.status}: ${JSON.stringify(errData)}`);
-      }
-
-      const data = await response.json();
-      
-      // 5. Extract Text
-      try {
-          const rawResult = data.candidates?.[0]?.content?.parts?.[0]?.text;
-          if (!rawResult) throw new Error("Empty response from Gemini");
-
-          if (expectJson) {
-              // Clean markdown code blocks if present ( ```json ... ``` )
-              const cleanJson = rawResult.replace(/```json|```/g, '').trim();
-              return JSON.parse(cleanJson);
-          }
-          return rawResult;
-      } catch (e) {
-          console.error("Failed to parse Gemini response", e);
-          throw new Error("AI response was not valid JSON");
-      }
-  }
-
-  private async callGroq(prompt: string): Promise<any> {
-      const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-          method: "POST",
-          headers: {
-              "Authorization": `Bearer ${this.groqKey}`,
-              "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-              messages: [{ role: "user", content: prompt }],
-              model: "llama-3.3-70b-versatile",
-              temperature: 0.1,
-              response_format: { type: "json_object" }
-          })
-      });
-
-      if (!response.ok) throw new Error("Groq API failed");
-      const data = await response.json();
-      return JSON.parse(data.choices[0].message.content);
-  }
-
-  // --- HELPERS ---
-  private buildPrompt(rawText: string): string {
-      return `
-        Role: Data Extractor.
-        Task: Extract structured data from the text below.
+        // Extract URLs from Grounding Metadata
+        const urls = new Set<string>();
         
-        INPUT:
-        """${rawText.slice(0, 20000)}"""
+        // Method 1: Grounding Chunks
+        const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+        chunks.forEach((chunk: any) => {
+            if (chunk.web?.uri) urls.add(chunk.web.uri);
+        });
 
-        JSON STRUCTURE:
-        {
-          "title": "String",
-          "organizer": "String",
-          "deadline": "String (Human readable)",
-          "deadlineDate": "String (YYYY-MM-DD)",
-          "grantOrPrize": "String",
-          "type": "Festival" | "Lab" | "Grant" | "Residency",
-          "scope": "National" | "International",
-          "description": "String",
-          "eligibility": ["String"],
-          "applicationFee": "String",
-          "contact": { "website": "String", "email": "String" },
-          "groundingSources": ["String (List of URLs mentioned)"]
+        // Method 2: Fallback text parsing if tool fails but returns text with links
+        if (urls.size === 0 && response.text) {
+             const urlRegex = /(https?:\/\/[^\s]+)/g;
+             const matches = response.text.match(urlRegex);
+             if (matches) matches.forEach(m => urls.add(m));
         }
-      `;
+        
+        // Method 3: Fallback to Hallucination/Prediction if Search Tool returned nothing useful
+        if (urls.size === 0) {
+             console.log("Search grounding empty, falling back to prediction.");
+             const predicted = await this.hallucinateUrls(topic);
+             predicted.forEach(u => urls.add(u));
+        }
+
+        return Array.from(urls).filter(u => !u.includes('google.com') && !u.includes('youtube.com'));
+
+      } catch (e) {
+        console.error("Discovery Error, failing over to prediction", e);
+        return this.hallucinateUrls(topic);
+      }
+  }
+
+  async hallucinateUrls(topic: string): Promise<string[]> {
+      try {
+        const response = await this.client?.models.generateContent({
+            model: this.EXTRACTION_MODEL,
+            contents: `Predict 3-5 reliable URLs where I can find "${topic}". Return ONLY a JSON object: { "urls": ["url1", "url2"] }`,
+            config: { responseMimeType: "application/json" }
+        });
+        const json = JSON.parse(response?.text || "{}");
+        return json.urls || [];
+      } catch {
+          return [];
+      }
+  }
+
+  /**
+   * Bulk Extraction
+   */
+  async processUrl(url: string, onLog: (l: AgentLog) => void): Promise<Partial<Opportunity>[]> {
+      this.rotateKey();
+      if (!this.client) return [];
+
+      try {
+          onLog({ message: `Fetching: ${url}`, type: 'action' });
+          const content = await webScraperService.fetchUrlContent(url);
+          
+          if (content.length < 500) {
+             onLog({ message: `Skipped ${url} (Content too short)`, type: 'error' });
+             return [];
+          }
+
+          onLog({ message: `Analyzing ${content.length} chars...`, type: 'info' });
+          
+          // Bulk Extraction Prompt
+          const prompt = `
+            Analyze the following text scraped from ${url}. 
+            Identify ALL distinct grants, festivals, residencies, or funding opportunities mentioned.
+            Ignore items that are clearly expired (deadlines before 2024).
+            
+            Return a JSON object with this structure:
+            {
+              "opportunities": [
+                {
+                  "title": "String",
+                  "organizer": "String",
+                  "deadline": "String (Human readable)",
+                  "deadlineDate": "YYYY-MM-DD",
+                  "grantOrPrize": "String (Value)",
+                  "type": "Grant" | "Festival" | "Residency" | "Lab",
+                  "description": "String (Summary)",
+                  "eligibility": ["String", "String"],
+                  "contact": { "website": "${url}" }
+                }
+              ]
+            }
+
+            Text:
+            """${content.slice(0, 25000)}"""
+          `;
+
+          const response = await this.client.models.generateContent({
+              model: this.EXTRACTION_MODEL,
+              contents: prompt,
+              config: {
+                  responseMimeType: "application/json"
+              }
+          });
+
+          const jsonText = response.text || "{}";
+          const parsed = JSON.parse(jsonText);
+          const rawList = parsed.opportunities || [];
+
+          const results: Partial<Opportunity>[] = [];
+          for (const item of rawList) {
+              if (item && item.title && item.title !== "Untitled") {
+                  results.push(this.augmentData(item, "Autonomous Agent", url));
+              }
+          }
+          
+          return results;
+
+      } catch (e: any) {
+          onLog({ message: `Extraction failed for ${url}: ${e.message}`, type: 'error' });
+          return [];
+      }
+  }
+
+  // Compatibility Method for Manual Input
+  async extractOpportunityFromText(text: string, sourceUrl?: string): Promise<Partial<Opportunity>> {
+     this.rotateKey();
+     if (!this.client) throw new Error("No API Key");
+
+     const prompt = `
+        Extract a single opportunity from this text.
+        Return JSON: { "title": "", "organizer": "", "deadline": "", "deadlineDate": "YYYY-MM-DD", "grantOrPrize": "", "type": "Grant", "description": "", "eligibility": [], "contact": {"website": ""} }
+        
+        Text: """${text.slice(0, 20000)}"""
+     `;
+
+     const response = await this.client.models.generateContent({
+         model: this.EXTRACTION_MODEL,
+         contents: prompt,
+         config: { responseMimeType: "application/json" }
+     });
+
+     const data = JSON.parse(response.text || "{}");
+     return this.augmentData(data, "Manual Extraction", sourceUrl);
+  }
+
+  // Compatibility Method for Manual URL
+  async analyzeSpecificUrl(url: string): Promise<Partial<Opportunity>> {
+      const opps = await this.processUrl(url, () => {});
+      if (opps.length > 0) return opps[0];
+      throw new Error("No opportunities found on this URL.");
   }
 
   private augmentData(parsed: any, modelName: string, sourceUrl?: string): Partial<Opportunity> {
@@ -281,7 +261,7 @@ export class AiAgentService {
           aiMetadata: { 
               model: modelName, 
               discoveryDate: new Date().toISOString(), 
-              discoveryQuery: 'Automated Scan' 
+              discoveryQuery: 'Autonomous Crawl' 
           }
       };
   }
