@@ -1,268 +1,364 @@
-import { GoogleGenAI } from "@google/genai";
 import { Opportunity } from "../types";
-import { webScraperService } from "./WebScraperService";
 
-interface AgentLog {
-  message: string;
-  type: 'info' | 'success' | 'error' | 'action';
+// ============================================================
+// SINGLE SOURCE OF TRUTH FOR GEMINI API CALLS
+// Uses raw fetch() with v1beta endpoint to support Tools/Grounding
+// ============================================================
+
+const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
+// Using 1.5 Flash Latest which is highly performant for this task
+const MODEL = "gemini-1.5-flash-latest"; 
+
+// ============================================================
+// KEY MANAGER
+// ============================================================
+class KeyManager {
+  private keys: string[] = [];
+  private cooldowns: Map<string, number> = new Map(); // key -> cooldown-ends-at timestamp
+  private lastUsed: Map<string, number> = new Map();
+  private static instance: KeyManager;
+
+  private constructor() {
+    try {
+      const env = (import.meta as any).env || {};
+      // Handle various env var formats
+      const raw = env.VITE_GOOGLE_API_KEY || env.GOOGLE_API_KEY || "";
+      this.keys = raw.split(",").map((k: string) => k.trim()).filter((k: string) => k.length > 0);
+      
+      this.keys.forEach(k => {
+        this.cooldowns.set(k, 0);
+        this.lastUsed.set(k, 0);
+      });
+      // console.log(`✅ KeyManager: Loaded ${this.keys.length} key(s)`);
+    } catch (e) {
+      console.error("❌ KeyManager: Failed to load keys", e);
+    }
+  }
+
+  static getInstance(): KeyManager {
+    if (!KeyManager.instance) KeyManager.instance = new KeyManager();
+    return KeyManager.instance;
+  }
+
+  getKey(): string | null {
+    const now = Date.now();
+    // Pick the key that is not on cooldown and was used longest ago
+    let best: string | null = null;
+    let bestTime = Infinity;
+
+    for (const key of this.keys) {
+      if ((this.cooldowns.get(key) || 0) > now) continue; // Still on cooldown
+      const used = this.lastUsed.get(key) || 0;
+      if (used < bestTime) {
+        bestTime = used;
+        best = key;
+      }
+    }
+
+    if (best) this.lastUsed.set(best, now);
+    return best;
+  }
+
+  // Put a key on cooldown for 60 seconds
+  cooldown(key: string) {
+    this.cooldowns.set(key, Date.now() + 60000);
+    // console.log(`⏳ Key ...${key.slice(-4)} on cooldown for 60s`);
+  }
+
+  // Reset all cooldowns (emergency)
+  resetAll() {
+    this.keys.forEach(k => this.cooldowns.set(k, 0));
+    // console.log("🔄 All key cooldowns reset");
+  }
+
+  hasKeys(): boolean {
+    return this.keys.length > 0;
+  }
+
+  getKeyCount() {
+      return this.keys.length;
+  }
 }
 
-// Reliable Indian Opportunity Sources to use when AI Search fails
-const BACKUP_SOURCES = [
-    "https://www.inlaksfoundation.org/opportunities/",
-    "https://khojstudios.org/opportunities/",
-    "https://filmfreeway.com/festivals/curated?tags=india",
-    "https://www.goathe.in/grants",
-    "https://serendipityarts.org/grants",
-    "https://keralaculture.org/opportunities",
-    "https://www.indiaifa.org/grants-projects",
-    "https://www.tata.com/community/commitments/arts-culture"
-];
+// ============================================================
+// CORE GEMINI CALLER
+// ============================================================
+async function callGemini(
+  prompt: string,
+  useGrounding: boolean = false,
+  logCallback?: (msg: string) => void
+): Promise<{ text: string; sources: string[] }> {
 
-export class AiAgentService {
-  private googleKeys: string[] = [];
-  private currentKeyIndex = 0;
-  private client: GoogleGenAI | null = null;
-  
-  // Model Configuration
-  // gemini-2.0-flash-exp is currently the reliable preview model for Search Grounding
-  private readonly SEARCH_MODEL = "gemini-2.0-flash-exp"; 
-  private readonly EXTRACTION_MODEL = "gemini-2.0-flash-exp";
+  const km = KeyManager.getInstance();
+  if (!km.hasKeys()) throw new Error("No API keys configured.");
 
-  constructor() {
-    this.reloadKeys();
-  }
+  const maxAttempts = 6;
+  let lastError = "";
 
-  public reloadKeys() {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const key = km.getKey();
+
+    if (!key) {
+      if (logCallback) logCallback("⏸️ All keys cooling down. Waiting 15s...");
+      await new Promise(r => setTimeout(r, 15000));
+      km.resetAll();
+      continue;
+    }
+
+    // Throttle: always wait at least 2s between any API call
+    await new Promise(r => setTimeout(r, 2000));
+
     try {
-        const env = (import.meta as any).env || {};
-        const potentialGoogleVars = [env.VITE_GOOGLE_API_KEY, env.GOOGLE_API_KEY];
-        const foundKeys = new Set<string>();
-        potentialGoogleVars.forEach(val => {
-            if (val && typeof val === 'string') {
-                val.split(',').forEach(k => {
-                    const clean = k.trim();
-                    if (clean) foundKeys.add(clean);
-                });
-            }
-        });
-        this.googleKeys = Array.from(foundKeys);
-        this.initClient();
-    } catch (e) {
-        console.error("Failed to load keys", e);
+      // if (logCallback) logCallback(`🚀 Gemini call attempt ${attempt}/${maxAttempts}`);
+
+      const url = `${GEMINI_BASE_URL}/${MODEL}:generateContent?key=${key}`;
+
+      const body: any = {
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+      };
+
+      if (useGrounding) {
+        body.tools = [{ googleSearchRetrieval: {} }];
+      }
+
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      // Handle errors by status code
+      if (res.status === 429 || res.status === 503) {
+        if (logCallback) logCallback(`⚠️ Rate limited (${res.status}). Switching keys...`);
+        km.cooldown(key);
+        continue;
+      }
+
+      if (!res.ok) {
+        const errText = await res.text();
+        lastError = `HTTP ${res.status}: ${errText}`;
+        console.warn(`⚠️ Gemini error: ${lastError}`);
+        // Don't cooldown for non-rate-limit errors (like 400), just retry logic might catch it or fail
+        if (res.status === 404) {
+             throw new Error(`Model ${MODEL} not found on v1beta.`);
+        }
+        continue;
+      }
+
+      const json = await res.json();
+
+      // Extract text
+      const textPart = json.candidates?.[0]?.content?.parts?.find((p: any) => p.text);
+      const text = textPart?.text || "";
+
+      // Extract grounding source URLs
+      const sources: string[] = [];
+      const chunks = json.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
+      chunks.forEach((c: any) => { 
+          if (c.web?.uri) sources.push(c.web.uri); 
+      });
+
+      // if (logCallback) logCallback(`✅ Gemini returned ${text.length} chars, ${sources.length} sources`);
+      return { text, sources };
+
+    } catch (err: any) {
+      lastError = err.message || String(err);
+      console.warn(`⚠️ Attempt ${attempt} error: ${lastError}`);
     }
   }
 
-  private initClient() {
-    if (this.googleKeys.length > 0) {
-      this.client = new GoogleGenAI({ apiKey: this.googleKeys[this.currentKeyIndex] });
-    }
-  }
+  throw new Error(`Gemini failed after ${maxAttempts} attempts. Last: ${lastError}`);
+}
 
-  private rotateKey() {
-    if (this.googleKeys.length > 1) {
-      this.currentKeyIndex = (this.currentKeyIndex + 1) % this.googleKeys.length;
-      this.initClient();
-    }
-  }
+// ============================================================
+// JSON PARSER
+// ============================================================
+function parseJSON<T>(text: string): T | null {
+  // Try direct parse
+  try { return JSON.parse(text) as T; } catch {}
 
+  // Try extracting from markdown code block
+  const mdMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (mdMatch) { try { return JSON.parse(mdMatch[1]) as T; } catch {} }
+
+  // Try extracting raw array or object
+  const arrMatch = text.match(/\[[\s\S]*\]/);
+  if (arrMatch) { try { return JSON.parse(arrMatch[0]) as T; } catch {} }
+
+  const objMatch = text.match(/\{[\s\S]*\}/);
+  if (objMatch) { try { return JSON.parse(objMatch[0]) as T; } catch {} }
+
+  return null;
+}
+
+// ============================================================
+// AI AGENT SERVICE (Compatible Wrapper)
+// ============================================================
+export class AiAgentService {
+  
   public getDebugInfo() {
       return {
-          googleKeys: this.googleKeys.length,
-          currentKeyIdx: this.currentKeyIndex,
-          activeModel: this.SEARCH_MODEL
+          googleKeys: KeyManager.getInstance().getKeyCount(),
+          activeModel: MODEL,
+          method: "REST API + Search Grounding"
       };
   }
 
-  // ===== AUTONOMOUS AGENT METHODS =====
+  /**
+   * Search for opportunities based on a topic string.
+   * This replaces the old "discovery -> scraping" loop with a single "Grounding" call.
+   */
+  async scanWeb(logCallback: (msg: string) => void, topic: string): Promise<Opportunity[]> {
+    const now = new Date();
+    const year = now.getFullYear();
+    const dateStr = now.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
 
-  async generateSearchTopics(): Promise<string[]> {
-      const topics = [
-        "Film grants for Indian filmmakers 2025 apply now",
-        "Visual arts residencies in India deadline 2025",
-        "Theatre funding organizations India application",
-        "Documentary fellowships India 2025 open call",
-        "Music production grants India 2025",
-        "Photography awards India 2025 submission",
-        "Screenwriting labs India 2025"
-      ];
-      return topics.sort(() => 0.5 - Math.random()).slice(0, 3);
+    const query = `Find grant and festival opportunities for: ${topic} in India. Current Date: ${dateStr}`;
+    logCallback(`🔍 Agent searching via Google Grounding: "${topic}"`);
+
+    const prompt = `Today is ${dateStr}.
+
+Search the web for active opportunities for Indian artists related to: "${topic}"
+
+Find 5-8 opportunities that are:
+- Currently open or opening soon
+- Available to Indian citizens
+- Grants, residencies, festivals, fellowships, or competitions
+- Have deadlines in ${year} or ${year + 1}
+
+Return ONLY a JSON array. No explanations. No markdown.
+
+[{
+  "title": "Opportunity title",
+  "organizer": "Organization name",
+  "deadline": "YYYY-MM-DD",
+  "grantOrPrize": "Amount or description",
+  "type": "Grant|Residency|Festival|Fellowship|Competition",
+  "description": "2 sentence summary",
+  "website": "Source URL"
+}]`;
+
+    try {
+        const { text, sources } = await callGemini(prompt, true, logCallback);
+
+        const raw = parseJSON<any[]>(text);
+        if (!raw || !Array.isArray(raw)) {
+        logCallback("⚠️ Could not parse valid JSON from AI response.");
+        return [];
+        }
+
+        const opportunities: Opportunity[] = [];
+
+        raw.forEach((item, i) => {
+        if (!item.title) return;
+
+        // Parse deadline
+        let deadline = new Date(item.deadline);
+        if (isNaN(deadline.getTime())) {
+            // Default to 45 days in future if parsing fails
+            deadline = new Date(now.getTime() + 45 * 86400000); 
+        }
+        
+        // Skip expired (allowing a 2-day grace period for timezone diffs)
+        if (deadline < new Date(now.getTime() - 2 * 86400000)) return; 
+
+        const daysLeft = Math.ceil((deadline.getTime() - now.getTime()) / 86400000);
+        // Prefer item website, fallback to grounding source
+        const url = item.website || sources[0] || "";
+
+        opportunities.push({
+            id: `crawl-${Date.now()}-${i}`,
+            title: item.title,
+            organizer: item.organizer || "Unknown",
+            deadline: item.deadline || "See Website",
+            deadlineDate: deadline.toISOString().split("T")[0],
+            daysLeft: daysLeft > 0 ? daysLeft : 0,
+            grantOrPrize: item.grantOrPrize || "See Website",
+            eligibility: ["Indian Citizens"],
+            type: item.type || "Grant",
+            scope: "National",
+            category: topic,
+            description: item.description || "",
+            contact: { website: url, email: "", phone: "" },
+            verificationStatus: "draft",
+            sourceUrl: url,
+            groundingSources: sources,
+            aiConfidenceScore: 85,
+            aiReasoning: "Found via Gemini Search Grounding",
+            status: "draft",
+            createdAt: new Date().toISOString(),
+            aiMetadata: {
+            model: MODEL,
+            discoveryQuery: query,
+            discoveryDate: new Date().toISOString(),
+            },
+        });
+        });
+
+        return opportunities;
+
+    } catch (e: any) {
+        logCallback(`❌ Error during scan: ${e.message}`);
+        return [];
+    }
   }
 
   /**
-   * Uses Google Search Grounding to find REAL URLs.
-   * Falls back to HARDCODED SOURCES if search fails.
+   * Analyze a specific URL using Grounding to "Read" the page.
+   * This bypasses CORS and scraping protections.
    */
-  async discoverUrlsForTopic(topic: string): Promise<{ urls: string[], source: 'live' | 'backup' }> {
-      if (!this.client) throw new Error("No API Keys available");
-      this.rotateKey();
+  async analyzeSpecificUrl(url: string, logCallback: (msg: string) => void = () => {}): Promise<Partial<Opportunity>> {
+    logCallback(`🔍 Visiting URL via Gemini: ${url}`);
 
-      try {
-        // Attempt 1: Live Google Search
-        const response = await this.client.models.generateContent({
-            model: this.SEARCH_MODEL,
-            contents: `Find 5 specific, official URLs that list ${topic}. Do not give me general homepages, give me the pages with the lists or application details.`,
-            config: {
-                tools: [{ googleSearch: {} }]
-            }
-        });
+    const prompt = `Visit this URL and extract opportunity information: ${url}
 
-        const urls = new Set<string>();
-        
-        // Extract from Grounding
-        const chunks = response.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
-        chunks.forEach((chunk: any) => {
-            if (chunk.web?.uri) urls.add(chunk.web.uri);
-        });
+Return ONLY JSON. No explanations.
 
-        // Extract from Text
-        if (response.text) {
-             const urlRegex = /(https?:\/\/[^\s]+)/g;
-             const matches = response.text.match(urlRegex);
-             if (matches) matches.forEach(m => urls.add(m));
-        }
+{
+  "title": "Opportunity title",
+  "organizer": "Organization",
+  "deadline": "YYYY-MM-DD or 'See Website'",
+  "grantOrPrize": "Amount or description",
+  "type": "Grant|Residency|Festival|Fellowship|Competition",
+  "description": "2 sentence summary"
+}`;
 
-        const validUrls = Array.from(urls).filter(u => !u.includes('google.com') && !u.includes('youtube.com'));
+    const { text } = await callGemini(prompt, true, logCallback);
 
-        if (validUrls.length > 0) {
-            return { urls: validUrls, source: 'live' };
-        }
-        
-        console.warn("Search returned 0 valid URLs. Using backup sources.");
-        throw new Error("Empty search results");
+    const data = parseJSON<any>(text);
+    if (!data || !data.title) {
+      throw new Error("Could not extract meaningful data from URL.");
+    }
 
-      } catch (e) {
-        // Fallback: Use backup sources mixed with hallucination attempts
-        // We return a random subset of backup sources to keep the crawler moving
-        const shuffled = BACKUP_SOURCES.sort(() => 0.5 - Math.random()).slice(0, 2);
-        return { urls: shuffled, source: 'backup' };
-      }
-  }
+    let deadline = new Date(data.deadline);
+    if (isNaN(deadline.getTime())) deadline = new Date(Date.now() + 30 * 86400000);
+    const daysLeft = Math.ceil((deadline.getTime() - Date.now()) / 86400000);
 
-  /**
-   * Bulk Extraction
-   */
-  async processUrl(url: string, onLog: (l: AgentLog) => void): Promise<Partial<Opportunity>[]> {
-      this.rotateKey();
-      if (!this.client) return [];
-
-      try {
-          onLog({ message: `Fetching: ${url}`, type: 'action' });
-          const content = await webScraperService.fetchUrlContent(url);
-          
-          if (content.length < 500) {
-             onLog({ message: `Skipped ${url} (Content too short)`, type: 'error' });
-             return [];
-          }
-
-          onLog({ message: `Analyzing ${content.length} chars with ${this.EXTRACTION_MODEL}...`, type: 'info' });
-          
-          // Bulk Extraction Prompt
-          const prompt = `
-            Analyze the following text scraped from ${url}. 
-            Identify ALL distinct grants, festivals, residencies, or funding opportunities mentioned.
-            Ignore items that are clearly expired (deadlines before 2024).
-            
-            Return a JSON object with this structure:
-            {
-              "opportunities": [
-                {
-                  "title": "String",
-                  "organizer": "String",
-                  "deadline": "String (Human readable)",
-                  "deadlineDate": "YYYY-MM-DD",
-                  "grantOrPrize": "String (Value)",
-                  "type": "Grant" | "Festival" | "Residency" | "Lab",
-                  "description": "String (Summary)",
-                  "eligibility": ["String", "String"],
-                  "contact": { "website": "${url}" }
-                }
-              ]
-            }
-
-            Text:
-            """${content.slice(0, 25000)}"""
-          `;
-
-          const response = await this.client.models.generateContent({
-              model: this.EXTRACTION_MODEL,
-              contents: prompt,
-              config: {
-                  responseMimeType: "application/json"
-              }
-          });
-
-          const jsonText = response.text || "{}";
-          const parsed = JSON.parse(jsonText);
-          const rawList = parsed.opportunities || [];
-
-          const results: Partial<Opportunity>[] = [];
-          for (const item of rawList) {
-              if (item && item.title && item.title !== "Untitled") {
-                  results.push(this.augmentData(item, "Autonomous Agent", url));
-              }
-          }
-          
-          return results;
-
-      } catch (e: any) {
-          onLog({ message: `Extraction failed for ${url}: ${e.message}`, type: 'error' });
-          return [];
-      }
-  }
-
-  // Compatibility Method for Manual Input
-  async extractOpportunityFromText(text: string, sourceUrl?: string): Promise<Partial<Opportunity>> {
-     this.rotateKey();
-     if (!this.client) throw new Error("No API Key");
-
-     const prompt = `
-        Extract a single opportunity from this text.
-        Return JSON: { "title": "", "organizer": "", "deadline": "", "deadlineDate": "YYYY-MM-DD", "grantOrPrize": "", "type": "Grant", "description": "", "eligibility": [], "contact": {"website": ""} }
-        
-        Text: """${text.slice(0, 20000)}"""
-     `;
-
-     const response = await this.client.models.generateContent({
-         model: this.EXTRACTION_MODEL,
-         contents: prompt,
-         config: { responseMimeType: "application/json" }
-     });
-
-     const data = JSON.parse(response.text || "{}");
-     return this.augmentData(data, "Manual Extraction", sourceUrl);
-  }
-
-  // Compatibility Method for Manual URL
-  async analyzeSpecificUrl(url: string): Promise<Partial<Opportunity>> {
-      const opps = await this.processUrl(url, () => {});
-      if (opps.length > 0) return opps[0];
-      throw new Error("No opportunities found on this URL.");
-  }
-
-  private augmentData(parsed: any, modelName: string, sourceUrl?: string): Partial<Opportunity> {
-      let daysLeft = 30;
-      if (parsed.deadlineDate) {
-          const d = new Date(parsed.deadlineDate);
-          if (!isNaN(d.getTime())) {
-              daysLeft = Math.ceil((d.getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-          }
-      }
-
-      return {
-          ...parsed,
-          daysLeft,
-          sourceUrl: sourceUrl || parsed.contact?.website,
-          verificationStatus: 'verified',
-          status: 'published',
-          createdAt: new Date().toISOString(),
-          aiConfidenceScore: 100,
-          aiMetadata: { 
-              model: modelName, 
-              discoveryDate: new Date().toISOString(), 
-              discoveryQuery: 'Autonomous Crawl' 
-          }
-      };
+    return {
+      title: data.title,
+      organizer: data.organizer || "Unknown",
+      deadline: data.deadline || "See Website",
+      deadlineDate: deadline.toISOString().split("T")[0],
+      daysLeft,
+      grantOrPrize: data.grantOrPrize || "See Website",
+      eligibility: [],
+      type: data.type || "Grant",
+      scope: "National",
+      description: data.description || "",
+      contact: { website: url, email: "", phone: "" },
+      verificationStatus: "verified",
+      sourceUrl: url,
+      groundingSources: [url],
+      aiConfidenceScore: 90,
+      aiReasoning: "Direct URL analysis via Gemini",
+      status: "published",
+      createdAt: new Date().toISOString(),
+      aiMetadata: {
+        model: MODEL,
+        discoveryQuery: url,
+        discoveryDate: new Date().toISOString(),
+      },
+    };
   }
 }
 

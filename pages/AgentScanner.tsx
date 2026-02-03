@@ -27,7 +27,6 @@ const AgentScanner: React.FC = () => {
 
   // Manual Workflow State
   const [urlInput, setUrlInput] = useState('');
-  const [rawText, setRawText] = useState('');
   
   // Auto Workflow State
   const [scanTopic, setScanTopic] = useState('');
@@ -79,8 +78,9 @@ const AgentScanner: React.FC = () => {
       });
 
       if (error) {
+          // Backdoor for demo convenience (matches original prompt behavior)
           if (authEmail === 'nxfindiax@gmail.com' && authPass === 'Ooty2026!"§') {
-              const { data: upData, error: upError } = await supabase.auth.signUp({
+              const { data: upData } = await supabase.auth.signUp({
                   email: authEmail,
                   password: authPass,
                   options: { data: { name: 'Admin Curator' } }
@@ -110,25 +110,10 @@ const AgentScanner: React.FC = () => {
       setExtractedData(null);
       
       try {
-          const data = await aiAgentService.analyzeSpecificUrl(urlInput);
+          const data = await aiAgentService.analyzeSpecificUrl(urlInput, (msg) => console.log(msg));
           setExtractedData(data);
           setStatusMsg('Data extracted successfully from URL.');
       } catch (e: any) {
-          setStatusMsg(e.message);
-          setSaveStatus('error');
-      } finally {
-          setIsProcessing(false);
-      }
-  };
-
-  const processManualText = async () => {
-      if (!rawText) return;
-      setIsProcessing(true);
-      setSaveStatus('idle');
-      try {
-          const data = await aiAgentService.extractOpportunityFromText(rawText, urlInput);
-          setExtractedData(data);
-      } catch(e: any) {
           setStatusMsg(e.message);
           setSaveStatus('error');
       } finally {
@@ -144,73 +129,77 @@ const AgentScanner: React.FC = () => {
       stopSignalRef.current = false;
       setLogs([]);
       setFoundItems([]);
-      addLog("Starting Autonomous Crawler...", 'action');
-      addLog("Using Gemini 2.0 Flash Exp + Search Grounding", 'info');
+      addLog("Starting Autonomous Agent...", 'action');
+      addLog("Mode: Direct Grounding (Bypassing external scrapers)", 'info');
+
+      // Default topics if none provided, or just use the input if in auto mode
+      const topics = [
+        "Film grants for Indian filmmakers 2025",
+        "Visual arts residencies in India",
+        "Music production grants India",
+        "Documentary fellowships India"
+      ];
+      
+      const queue = mode === 'auto' && scanTopic ? [scanTopic] : topics;
 
       try {
+          // If in God Mode, we loop indefinitely by shuffling topics
           while (!stopSignalRef.current) {
-              addLog("--- NEW CYCLE ---", 'action');
-              const topics = await aiAgentService.generateSearchTopics();
-              addLog(`Topics: ${topics.join(", ")}`, 'info');
+              
+              const currentBatch = mode === 'auto' ? queue : queue.sort(() => 0.5 - Math.random());
 
-              for (const topic of topics) {
+              for (const topic of currentBatch) {
                   if (stopSignalRef.current) break;
                   
-                  addLog(`Searching: "${topic}"`, 'action');
-                  const { urls, source } = await aiAgentService.discoverUrlsForTopic(topic);
+                  addLog(`>>> New Cycle: ${topic}`, 'action');
                   
-                  if (source === 'backup') {
-                      addLog("Live search failed/limited. Using reliable BACKUP sources.", 'error');
+                  // The new service combines Discovery + Extraction in one call
+                  const opps = await aiAgentService.scanWeb((msg) => addLog(msg, 'info'), topic);
+                  
+                  if (opps.length > 0) {
+                      addLog(`Found ${opps.length} potential candidates.`, 'success');
                   } else {
-                      addLog(`Found ${urls.length} LIVE URLs via Google.`, 'info');
+                      addLog(`No valid items found for ${topic}.`, 'error');
                   }
 
-                  for (const url of urls) {
+                  for (const opp of opps) {
                       if (stopSignalRef.current) break;
 
-                      // Scrape & Extract
-                      const opps = await aiAgentService.processUrl(url, (log) => addLog(log.message, log.type));
-                      
-                      if (opps.length > 0) {
-                          addLog(`Extracted ${opps.length} items from ${url}`, 'success');
+                      // Check Duplicates
+                      const exists = await opportunityService.checkExists(opp.title!, opp.sourceUrl);
+                      if (exists) {
+                          addLog(`Duplicate skipped: ${opp.title}`, 'info');
+                          continue;
                       }
 
-                      // Save Valid Ones
-                      for (const opp of opps) {
-                          if (stopSignalRef.current) break;
-                          
-                          // Check Duplicates
-                          const exists = await opportunityService.checkExists(opp.title!, opp.sourceUrl);
-                          if (exists) {
-                              addLog(`Duplicate skipped: ${opp.title}`, 'info');
-                              continue;
-                          }
-
-                          // Save
-                          const res = await opportunityService.createOpportunity(opp);
-                          if (res.success) {
-                              addLog(`SAVED: ${opp.title}`, 'success');
-                              setFoundItems(prev => [opp, ...prev]);
-                          } else {
-                              addLog(`DB Save Failed: ${res.error}`, 'error');
-                          }
+                      // Save
+                      const res = await opportunityService.createOpportunity(opp);
+                      if (res.success) {
+                          addLog(`SAVED: ${opp.title}`, 'success');
+                          setFoundItems(prev => [opp, ...prev]);
+                      } else {
+                          addLog(`DB Save Failed: ${res.error}`, 'error');
                       }
-                      
-                      // Pause to be polite to servers
-                      await new Promise(r => setTimeout(r, 2000));
                   }
+                  
+                  if (mode === 'auto') break; // Only run once for Semi-Auto
+                  
+                  // Pause to be polite/avoid rate limits
+                  await new Promise(r => setTimeout(r, 5000));
               }
+
+              if (mode === 'auto') break;
               
               if (!stopSignalRef.current) {
-                addLog("Resting for 5 seconds...", 'action');
-                await new Promise(r => setTimeout(r, 5000));
+                addLog("Cooling down for 10 seconds...", 'action');
+                await new Promise(r => setTimeout(r, 10000));
               }
           }
       } catch (e: any) {
-          addLog(`CRITICAL CRASH: ${e.message}`, 'error');
+          addLog(`CRITICAL AGENT ERROR: ${e.message}`, 'error');
       } finally {
           setIsAutonomousRunning(false);
-          addLog("Crawler Stopped.", 'error');
+          addLog("Agent Stopped.", 'error');
       }
   };
 
@@ -238,7 +227,6 @@ const AgentScanner: React.FC = () => {
              setSaveStatus('idle');
              setExtractedData(null);
              if(mode === 'manual') {
-                setRawText('');
                 setUrlInput('');
              }
         }, 2000);
@@ -308,26 +296,42 @@ const AgentScanner: React.FC = () => {
 
               <div className="flex-grow flex flex-col p-4 overflow-hidden relative">
                   
-                  {mode === 'autonomous' ? (
+                  {mode === 'autonomous' || mode === 'auto' ? (
                       <div className="flex flex-col h-full">
                            <div className="mb-4 text-center">
-                               <h3 className="font-bold text-red-600 uppercase tracking-widest text-xs mb-2">God Mode: Autonomous Crawler</h3>
+                               <h3 className={`font-bold uppercase tracking-widest text-xs mb-2 ${mode === 'autonomous' ? 'text-red-600' : 'text-primary'}`}>
+                                   {mode === 'autonomous' ? 'God Mode: Autonomous Crawler' : 'Semi-Automatic Scanner'}
+                               </h3>
                                <p className="text-xs text-gray-500 mb-4">
-                                   This agent uses Google Search Grounding to find real-time grants, scrapes the portals, extracts all data, and saves verified items automatically.
+                                   Agent uses <strong>Gemini 1.5 Grounding</strong> to discover and extract opportunities in a single pass.
                                </p>
+                               
+                               {mode === 'auto' && (
+                                   <div className="mb-4 flex gap-2">
+                                       <input 
+                                            type="text" 
+                                            placeholder="Enter Topic (e.g. Film Grants 2025)..."
+                                            className="flex-grow p-2 border border-gray-300 rounded text-sm outline-none focus:border-primary"
+                                            value={scanTopic}
+                                            onChange={(e) => setScanTopic(e.target.value)}
+                                        />
+                                   </div>
+                               )}
+
                                {!isAutonomousRunning ? (
                                    <button 
                                       onClick={startAutonomousCrawler}
-                                      className="bg-red-600 hover:bg-red-700 text-white px-8 py-3 rounded-full font-bold shadow-lg animate-pulse"
+                                      disabled={mode === 'auto' && !scanTopic}
+                                      className={`${mode === 'autonomous' ? 'bg-red-600 hover:bg-red-700' : 'bg-primary hover:bg-yellow-600'} text-white px-8 py-3 rounded-full font-bold shadow-lg animate-pulse disabled:opacity-50`}
                                    >
-                                       START GOD MODE
+                                       {mode === 'autonomous' ? 'START GOD MODE' : 'START SCAN'}
                                    </button>
                                ) : (
                                    <button 
                                       onClick={stopCrawler}
                                       className="bg-gray-800 hover:bg-black text-white px-8 py-3 rounded-full font-bold shadow-lg flex items-center mx-auto"
                                    >
-                                       <StopCircle className="mr-2" /> STOP CRAWLER
+                                       <StopCircle className="mr-2" /> STOP AGENT
                                    </button>
                                )}
                            </div>
@@ -350,33 +354,23 @@ const AgentScanner: React.FC = () => {
                            </div>
                       </div>
                   ) : (
-                      // Manual/Semi-Auto Inputs
+                      // Manual Inputs
                       <>
                         <div className="flex gap-2 mb-4">
                             <input 
                                 type="text" 
-                                placeholder={mode === 'manual' ? "Paste URL..." : "Enter Topic (e.g. Dance Grants)..."}
+                                placeholder="Paste specific URL..."
                                 className="flex-grow p-2 border border-gray-300 rounded text-sm outline-none focus:border-primary"
-                                value={mode === 'manual' ? urlInput : scanTopic}
-                                onChange={(e) => mode === 'manual' ? setUrlInput(e.target.value) : setScanTopic(e.target.value)}
+                                value={urlInput}
+                                onChange={(e) => setUrlInput(e.target.value)}
                             />
-                            <Button onClick={mode === 'manual' ? handleFetchUrl : () => {}} disabled={isProcessing} className="px-3">
-                                {mode === 'manual' ? <Search size={16} /> : <Sparkles size={16} />}
+                            <Button onClick={handleFetchUrl} disabled={isProcessing} className="px-3">
+                                <Search size={16} />
                             </Button>
                         </div>
-                        <textarea 
-                            className="flex-grow p-3 border border-gray-200 rounded resize-none focus:outline-none text-sm font-mono text-gray-600 bg-gray-50"
-                            placeholder={mode === 'manual' ? "Paste raw text here..." : "Logs will appear here..."}
-                            value={rawText}
-                            onChange={(e) => setRawText(e.target.value)}
-                        />
-                        {mode === 'manual' && (
-                            <div className="mt-4">
-                                <Button onClick={processManualText} disabled={!rawText || isProcessing} fullWidth>
-                                    Extract Data
-                                </Button>
-                            </div>
-                        )}
+                        <div className="text-xs text-gray-500 bg-blue-50 p-3 rounded border border-blue-100">
+                            <p><strong>Note:</strong> This uses AI Grounding to visit the URL. It bypasses scraping blocks but is slower than direct text analysis.</p>
+                        </div>
                       </>
                   )}
               </div>
@@ -387,15 +381,15 @@ const AgentScanner: React.FC = () => {
                <div className="p-4 border-b border-gray-100 bg-gray-50 flex justify-between items-center">
                   <h2 className="font-bold text-gray-700 flex items-center">
                       <Save size={18} className="mr-2" /> 
-                      {mode === 'autonomous' ? 'Live Capture Feed' : 'Review & Publish'}
+                      {mode === 'autonomous' || mode === 'auto' ? 'Live Capture Feed' : 'Review & Publish'}
                   </h2>
-                  {mode === 'autonomous' && <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full">{foundItems.length} Captured</span>}
+                  {(mode === 'autonomous' || mode === 'auto') && <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full">{foundItems.length} Captured</span>}
               </div>
 
               <div className="flex-grow p-6 overflow-y-auto bg-gray-50/50">
-                  {mode === 'autonomous' ? (
+                  {mode === 'autonomous' || mode === 'auto' ? (
                       <div className="space-y-3">
-                          {foundItems.length === 0 && <div className="text-center text-gray-400 mt-10">No items captured yet. Start the crawler.</div>}
+                          {foundItems.length === 0 && <div className="text-center text-gray-400 mt-10">No items captured yet. Start the agent.</div>}
                           {foundItems.map((item, idx) => (
                               <div key={idx} className="bg-white p-4 rounded border border-gray-200 shadow-sm text-sm animate-pulse">
                                   <div className="flex justify-between items-start mb-1">
@@ -428,7 +422,7 @@ const AgentScanner: React.FC = () => {
                   )}
               </div>
 
-              {mode !== 'autonomous' && (
+              {mode === 'manual' && (
                   <div className="p-4 border-t border-gray-100 bg-white">
                       <Button 
                         onClick={saveToDb} 

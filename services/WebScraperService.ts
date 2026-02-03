@@ -1,11 +1,12 @@
 
 export const webScraperService = {
-  // List of CORS proxies to try in order
+  // List of CORS proxies to try in order. 
+  // 'corsproxy.io' is generally the most reliable for text.
   proxies: [
-    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
     (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
-    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`,
-    (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`
+    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`
   ],
 
   async fetchUrlContent(url: string): Promise<string> {
@@ -15,20 +16,24 @@ export const webScraperService = {
       validUrl = `https://${url}`;
     }
 
-    console.log(`Scraping Target: ${validUrl}`);
+    // console.log(`Scraping Target: ${validUrl}`);
     let lastError: any;
 
     // Try proxies in rotation
     for (const proxyGen of this.proxies) {
       try {
         const proxyUrl = proxyGen(validUrl);
-        // console.log(`Trying proxy: ${proxyUrl}`);
         
-        // Timeout after 15 seconds
+        // Timeout after 10 seconds for speed
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
 
-        const response = await fetch(proxyUrl, { signal: controller.signal });
+        const response = await fetch(proxyUrl, { 
+            signal: controller.signal,
+            headers: {
+                'X-Requested-With': 'XMLHttpRequest' // Sometimes helps with CORS proxies
+            }
+        });
         clearTimeout(timeoutId);
 
         if (!response.ok) {
@@ -36,21 +41,23 @@ export const webScraperService = {
         }
 
         const html = await response.text();
-        if (!html || html.length < 200) {
-           throw new Error("Empty or too short response");
+        
+        // Looser check: sometimes valid pages are short or protected
+        if (!html || html.length < 100) {
+           throw new Error("Response too short");
         }
 
-        // Clean and return if successful
+        // If we got here, success!
         return this.cleanHtml(html);
       } catch (error: any) {
-        console.warn(`Proxy failed: ${error.message}`);
+        // console.warn(`Proxy failed: ${error.message}`);
         lastError = error;
         // Continue to next proxy
       }
     }
 
     // If all failed
-    throw new Error(`All proxies failed. Last error: ${lastError?.message || "Unknown"}`);
+    throw new Error(`All proxies failed.`);
   },
 
   cleanHtml(html: string): string {
