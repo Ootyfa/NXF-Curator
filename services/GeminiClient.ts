@@ -80,6 +80,7 @@ let discoveredEndpoint: string | null = null;
 async function discoverModel(key: string, log: (msg: string) => void): Promise<void> {
   log("🔍 Auto-detecting best available Gemini model...");
 
+  // Prefer v1beta for Tools/Grounding support
   const endpoints = ["v1beta", "v1"];
 
   for (const ep of endpoints) {
@@ -204,8 +205,9 @@ export async function geminiCall(
         contents: [{ role: "user", parts: [{ text: prompt }] }],
       };
 
+      // FIX: Use 'googleSearch' for public API v1beta
       if (options.grounding && discoveredEndpoint === 'v1beta') {
-        body.tools = [{ googleSearchRetrieval: {} }];
+        body.tools = [{ googleSearch: {} }];
       }
 
       const res = await fetch(url, {
@@ -228,7 +230,13 @@ export async function geminiCall(
       }
 
       if (!res.ok) {
-        lastError = await res.text();
+        const txt = await res.text();
+        try {
+            const errJson = JSON.parse(txt);
+            lastError = errJson.error?.message || txt;
+        } catch {
+            lastError = txt;
+        }
         // log(`⚠️ HTTP ${res.status}: ${lastError}`);
         continue;
       }
