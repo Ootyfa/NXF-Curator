@@ -1,4 +1,5 @@
 import { Opportunity } from "../types";
+import { webScraperService } from "./WebScraperService";
 
 // ============================================================
 // SINGLE SOURCE OF TRUTH FOR GEMINI API CALLS
@@ -6,7 +7,6 @@ import { Opportunity } from "../types";
 // ============================================================
 
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models";
-// Using 1.5 Flash Latest which is highly performant for this task
 const MODEL = "gemini-1.5-flash-latest"; 
 
 // ============================================================
@@ -14,14 +14,13 @@ const MODEL = "gemini-1.5-flash-latest";
 // ============================================================
 class KeyManager {
   private keys: string[] = [];
-  private cooldowns: Map<string, number> = new Map(); // key -> cooldown-ends-at timestamp
+  private cooldowns: Map<string, number> = new Map();
   private lastUsed: Map<string, number> = new Map();
   private static instance: KeyManager;
 
   private constructor() {
     try {
       const env = (import.meta as any).env || {};
-      // Handle various env var formats
       const raw = env.VITE_GOOGLE_API_KEY || env.GOOGLE_API_KEY || "";
       this.keys = raw.split(",").map((k: string) => k.trim()).filter((k: string) => k.length > 0);
       
@@ -29,7 +28,6 @@ class KeyManager {
         this.cooldowns.set(k, 0);
         this.lastUsed.set(k, 0);
       });
-      // console.log(`✅ KeyManager: Loaded ${this.keys.length} key(s)`);
     } catch (e) {
       console.error("❌ KeyManager: Failed to load keys", e);
     }
@@ -42,12 +40,11 @@ class KeyManager {
 
   getKey(): string | null {
     const now = Date.now();
-    // Pick the key that is not on cooldown and was used longest ago
     let best: string | null = null;
     let bestTime = Infinity;
 
     for (const key of this.keys) {
-      if ((this.cooldowns.get(key) || 0) > now) continue; // Still on cooldown
+      if ((this.cooldowns.get(key) || 0) > now) continue; 
       const used = this.lastUsed.get(key) || 0;
       if (used < bestTime) {
         bestTime = used;
@@ -59,16 +56,12 @@ class KeyManager {
     return best;
   }
 
-  // Put a key on cooldown for 60 seconds
   cooldown(key: string) {
     this.cooldowns.set(key, Date.now() + 60000);
-    // console.log(`⏳ Key ...${key.slice(-4)} on cooldown for 60s`);
   }
 
-  // Reset all cooldowns (emergency)
   resetAll() {
     this.keys.forEach(k => this.cooldowns.set(k, 0));
-    // console.log("🔄 All key cooldowns reset");
   }
 
   hasKeys(): boolean {
@@ -105,12 +98,9 @@ async function callGemini(
       continue;
     }
 
-    // Throttle: always wait at least 2s between any API call
     await new Promise(r => setTimeout(r, 2000));
 
     try {
-      // if (logCallback) logCallback(`🚀 Gemini call attempt ${attempt}/${maxAttempts}`);
-
       const url = `${GEMINI_BASE_URL}/${MODEL}:generateContent?key=${key}`;
 
       const body: any = {
@@ -118,7 +108,8 @@ async function callGemini(
       };
 
       if (useGrounding) {
-        body.tools = [{ googleSearchRetrieval: {} }];
+        // v1beta tools syntax
+        body.tools = [{ googleSearch: {} }]; 
       }
 
       const res = await fetch(url, {
@@ -127,7 +118,6 @@ async function callGemini(
         body: JSON.stringify(body),
       });
 
-      // Handle errors by status code
       if (res.status === 429 || res.status === 503) {
         if (logCallback) logCallback(`⚠️ Rate limited (${res.status}). Switching keys...`);
         km.cooldown(key);
@@ -138,27 +128,20 @@ async function callGemini(
         const errText = await res.text();
         lastError = `HTTP ${res.status}: ${errText}`;
         console.warn(`⚠️ Gemini error: ${lastError}`);
-        // Don't cooldown for non-rate-limit errors (like 400), just retry logic might catch it or fail
-        if (res.status === 404) {
-             throw new Error(`Model ${MODEL} not found on v1beta.`);
-        }
         continue;
       }
 
       const json = await res.json();
 
-      // Extract text
       const textPart = json.candidates?.[0]?.content?.parts?.find((p: any) => p.text);
       const text = textPart?.text || "";
 
-      // Extract grounding source URLs
       const sources: string[] = [];
       const chunks = json.candidates?.[0]?.groundingMetadata?.groundingChunks || [];
       chunks.forEach((c: any) => { 
           if (c.web?.uri) sources.push(c.web.uri); 
       });
 
-      // if (logCallback) logCallback(`✅ Gemini returned ${text.length} chars, ${sources.length} sources`);
       return { text, sources };
 
     } catch (err: any) {
@@ -167,21 +150,18 @@ async function callGemini(
     }
   }
 
-  throw new Error(`Gemini failed after ${maxAttempts} attempts. Last: ${lastError}`);
+  throw new Error(`Gemini failed: ${lastError}`);
 }
 
 // ============================================================
 // JSON PARSER
 // ============================================================
 function parseJSON<T>(text: string): T | null {
-  // Try direct parse
   try { return JSON.parse(text) as T; } catch {}
 
-  // Try extracting from markdown code block
   const mdMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
   if (mdMatch) { try { return JSON.parse(mdMatch[1]) as T; } catch {} }
 
-  // Try extracting raw array or object
   const arrMatch = text.match(/\[[\s\S]*\]/);
   if (arrMatch) { try { return JSON.parse(arrMatch[0]) as T; } catch {} }
 
@@ -192,7 +172,7 @@ function parseJSON<T>(text: string): T | null {
 }
 
 // ============================================================
-// AI AGENT SERVICE (Compatible Wrapper)
+// AI AGENT SERVICE
 // ============================================================
 export class AiAgentService {
   
@@ -200,165 +180,167 @@ export class AiAgentService {
       return {
           googleKeys: KeyManager.getInstance().getKeyCount(),
           activeModel: MODEL,
-          method: "REST API + Search Grounding"
+          method: "Hybrid (Grounding + Scraping Fallback)"
       };
   }
 
   /**
-   * Search for opportunities based on a topic string.
-   * This replaces the old "discovery -> scraping" loop with a single "Grounding" call.
+   * 1. Discovery: Uses Google Grounding to find opportunities
    */
   async scanWeb(logCallback: (msg: string) => void, topic: string): Promise<Opportunity[]> {
     const now = new Date();
     const year = now.getFullYear();
-    const dateStr = now.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
-
-    const query = `Find grant and festival opportunities for: ${topic} in India. Current Date: ${dateStr}`;
-    logCallback(`🔍 Agent searching via Google Grounding: "${topic}"`);
+    const dateStr = now.toLocaleDateString("en-US");
 
     const prompt = `Today is ${dateStr}.
+    Search for active grant and festival opportunities in India for: "${topic}"
+    Find 5-8 items that are open for Indian citizens with deadlines in ${year} or ${year + 1}.
+    
+    Return JSON array:
+    [{
+      "title": "Title",
+      "organizer": "Organizer",
+      "deadline": "YYYY-MM-DD",
+      "grantOrPrize": "Value",
+      "type": "Grant|Residency|Festival",
+      "description": "Summary",
+      "website": "URL"
+    }]`;
 
-Search the web for active opportunities for Indian artists related to: "${topic}"
-
-Find 5-8 opportunities that are:
-- Currently open or opening soon
-- Available to Indian citizens
-- Grants, residencies, festivals, fellowships, or competitions
-- Have deadlines in ${year} or ${year + 1}
-
-Return ONLY a JSON array. No explanations. No markdown.
-
-[{
-  "title": "Opportunity title",
-  "organizer": "Organization name",
-  "deadline": "YYYY-MM-DD",
-  "grantOrPrize": "Amount or description",
-  "type": "Grant|Residency|Festival|Fellowship|Competition",
-  "description": "2 sentence summary",
-  "website": "Source URL"
-}]`;
+    logCallback(`🔍 Discovery Phase: Searching for "${topic}"...`);
 
     try {
         const { text, sources } = await callGemini(prompt, true, logCallback);
-
         const raw = parseJSON<any[]>(text);
+        
         if (!raw || !Array.isArray(raw)) {
-        logCallback("⚠️ Could not parse valid JSON from AI response.");
-        return [];
+            logCallback("⚠️ No structured data found in AI response.");
+            return [];
         }
 
         const opportunities: Opportunity[] = [];
-
         raw.forEach((item, i) => {
-        if (!item.title) return;
+            if (!item.title) return;
+            
+            let deadline = new Date(item.deadline);
+            if (isNaN(deadline.getTime())) deadline = new Date(now.getTime() + 30 * 86400000);
+            
+            // Allow 7 day grace period for expired
+            if (deadline < new Date(now.getTime() - 7 * 86400000)) return;
 
-        // Parse deadline
-        let deadline = new Date(item.deadline);
-        if (isNaN(deadline.getTime())) {
-            // Default to 45 days in future if parsing fails
-            deadline = new Date(now.getTime() + 45 * 86400000); 
-        }
-        
-        // Skip expired (allowing a 2-day grace period for timezone diffs)
-        if (deadline < new Date(now.getTime() - 2 * 86400000)) return; 
+            const daysLeft = Math.ceil((deadline.getTime() - now.getTime()) / 86400000);
+            const url = item.website || sources[0] || "";
 
-        const daysLeft = Math.ceil((deadline.getTime() - now.getTime()) / 86400000);
-        // Prefer item website, fallback to grounding source
-        const url = item.website || sources[0] || "";
-
-        opportunities.push({
-            id: `crawl-${Date.now()}-${i}`,
-            title: item.title,
-            organizer: item.organizer || "Unknown",
-            deadline: item.deadline || "See Website",
-            deadlineDate: deadline.toISOString().split("T")[0],
-            daysLeft: daysLeft > 0 ? daysLeft : 0,
-            grantOrPrize: item.grantOrPrize || "See Website",
-            eligibility: ["Indian Citizens"],
-            type: item.type || "Grant",
-            scope: "National",
-            category: topic,
-            description: item.description || "",
-            contact: { website: url, email: "", phone: "" },
-            verificationStatus: "draft",
-            sourceUrl: url,
-            groundingSources: sources,
-            aiConfidenceScore: 85,
-            aiReasoning: "Found via Gemini Search Grounding",
-            status: "draft",
-            createdAt: new Date().toISOString(),
-            aiMetadata: {
-            model: MODEL,
-            discoveryQuery: query,
-            discoveryDate: new Date().toISOString(),
-            },
-        });
+            opportunities.push({
+                id: `crawl-${Date.now()}-${i}`,
+                title: item.title,
+                organizer: item.organizer || "Unknown",
+                deadline: item.deadline || "See Website",
+                deadlineDate: deadline.toISOString().split("T")[0],
+                daysLeft: daysLeft > 0 ? daysLeft : 0,
+                grantOrPrize: item.grantOrPrize || "See Website",
+                eligibility: ["Indian Citizens"],
+                type: item.type || "Grant",
+                scope: "National",
+                category: topic,
+                description: item.description || "",
+                contact: { website: url, email: "", phone: "" },
+                verificationStatus: "draft",
+                sourceUrl: url,
+                groundingSources: sources,
+                aiConfidenceScore: 85,
+                aiReasoning: "Found via Gemini Grounding",
+                status: "draft",
+                createdAt: new Date().toISOString(),
+            });
         });
 
         return opportunities;
-
     } catch (e: any) {
-        logCallback(`❌ Error during scan: ${e.message}`);
+        logCallback(`❌ Scan failed: ${e.message}`);
         return [];
     }
   }
 
   /**
-   * Analyze a specific URL using Grounding to "Read" the page.
-   * This bypasses CORS and scraping protections.
+   * 2. Analysis: Hybrid approach (Grounding First -> Scraper Fallback)
    */
   async analyzeSpecificUrl(url: string, logCallback: (msg: string) => void = () => {}): Promise<Partial<Opportunity>> {
-    logCallback(`🔍 Visiting URL via Gemini: ${url}`);
-
-    const prompt = `Visit this URL and extract opportunity information: ${url}
-
-Return ONLY JSON. No explanations.
-
-{
-  "title": "Opportunity title",
-  "organizer": "Organization",
-  "deadline": "YYYY-MM-DD or 'See Website'",
-  "grantOrPrize": "Amount or description",
-  "type": "Grant|Residency|Festival|Fellowship|Competition",
-  "description": "2 sentence summary"
-}`;
-
-    const { text } = await callGemini(prompt, true, logCallback);
-
-    const data = parseJSON<any>(text);
-    if (!data || !data.title) {
-      throw new Error("Could not extract meaningful data from URL.");
+    logCallback(`🔍 Analyzing URL: ${url}`);
+    
+    // Attempt 1: Gemini Grounding (Browsing)
+    try {
+        logCallback("Trying AI Direct Browse...");
+        const prompt = `Visit this URL: ${url}
+        Extract details: Title, Organizer, Deadline (YYYY-MM-DD), Prize, Type, Description.
+        Return JSON.`;
+        
+        const { text } = await callGemini(prompt, true, logCallback);
+        const data = parseJSON<any>(text);
+        
+        if (data && data.title && data.title !== "Untitled") {
+            logCallback("✅ AI Browsing Successful");
+            return this.formatData(data, url, "Gemini Grounding");
+        }
+    } catch (e) {
+        logCallback(`⚠️ AI Browse failed, falling back to scraper...`);
     }
 
-    let deadline = new Date(data.deadline);
-    if (isNaN(deadline.getTime())) deadline = new Date(Date.now() + 30 * 86400000);
-    const daysLeft = Math.ceil((deadline.getTime() - Date.now()) / 86400000);
+    // Attempt 2: Scraper + Text Analysis
+    try {
+        logCallback("Trying Web Scraper...");
+        const content = await webScraperService.fetchUrlContent(url);
+        logCallback(`✅ Scraper retrieved ${content.length} chars. Analyzing...`);
+        return this.extractOpportunityFromText(content, url);
+    } catch (e: any) {
+        logCallback(`❌ Scraper failed: ${e.message}`);
+        throw new Error("Could not extract data from URL via AI or Scraper.");
+    }
+  }
 
-    return {
-      title: data.title,
-      organizer: data.organizer || "Unknown",
-      deadline: data.deadline || "See Website",
-      deadlineDate: deadline.toISOString().split("T")[0],
-      daysLeft,
-      grantOrPrize: data.grantOrPrize || "See Website",
-      eligibility: [],
-      type: data.type || "Grant",
-      scope: "National",
-      description: data.description || "",
-      contact: { website: url, email: "", phone: "" },
-      verificationStatus: "verified",
-      sourceUrl: url,
-      groundingSources: [url],
-      aiConfidenceScore: 90,
-      aiReasoning: "Direct URL analysis via Gemini",
-      status: "published",
-      createdAt: new Date().toISOString(),
-      aiMetadata: {
-        model: MODEL,
-        discoveryQuery: url,
-        discoveryDate: new Date().toISOString(),
-      },
-    };
+  /**
+   * 3. Raw Text Extraction (Restored)
+   */
+  async extractOpportunityFromText(text: string, sourceUrl?: string): Promise<Partial<Opportunity>> {
+      const prompt = `Analyze this text for a grant/festival opportunity.
+      Return JSON: { "title": "", "organizer": "", "deadline": "YYYY-MM-DD", "grantOrPrize": "", "type": "Grant|Festival|Residency", "description": "" }
+      
+      Text: """${text.substring(0, 30000)}"""`;
+
+      const { text: responseText } = await callGemini(prompt, false);
+      const data = parseJSON<any>(responseText);
+      
+      if (!data) throw new Error("AI could not parse opportunities from text.");
+      
+      return this.formatData(data, sourceUrl || "", "Manual/Scraper Text Analysis");
+  }
+
+  // Helper to format AI response into App Type
+  private formatData(data: any, url: string, method: string): Partial<Opportunity> {
+      let deadline = new Date(data.deadline);
+      if (isNaN(deadline.getTime())) deadline = new Date(Date.now() + 30 * 86400000);
+      const daysLeft = Math.ceil((deadline.getTime() - Date.now()) / 86400000);
+
+      return {
+          title: data.title,
+          organizer: data.organizer || "Unknown",
+          deadline: data.deadline || "See Website",
+          deadlineDate: deadline.toISOString().split("T")[0],
+          daysLeft,
+          grantOrPrize: data.grantOrPrize || "See Website",
+          eligibility: [],
+          type: data.type || "Grant",
+          scope: "National",
+          description: data.description || "",
+          contact: { website: url, email: "", phone: "" },
+          verificationStatus: "verified",
+          sourceUrl: url,
+          groundingSources: [url],
+          aiConfidenceScore: 90,
+          aiReasoning: method,
+          status: "published",
+          createdAt: new Date().toISOString()
+      };
   }
 }
 
