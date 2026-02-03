@@ -1,10 +1,10 @@
 import { Opportunity } from "../types";
-import { geminiCall, safeParseJSON } from "./GeminiClient";
+import { groqCall, safeParseJSON } from "./GroqClient";
 import { webScraperService } from "./WebScraperService";
 
 // ============================================================
-// AI AGENT SERVICE
-// Supports both Manual Text Parsing and Autonomous Web Scanning
+// AI AGENT SERVICE (GROQ EDITION)
+// Supports Manual Parsing & Autonomous Hub Crawling
 // ============================================================
 export class AiAgentService {
   
@@ -16,11 +16,11 @@ export class AiAgentService {
           throw new Error("Content too short to analyze.");
       }
 
-      // Truncate to avoid token limits
-      const textToAnalyze = rawText.substring(0, 30000);
+      // Truncate to avoid token limits (Groq has limits too, though Llama 70b is generous)
+      const textToAnalyze = rawText.substring(0, 15000); 
 
       const prompt = `
-      Analyze the following text and extract opportunity details.
+      You are an expert grant researcher. Analyze the text below and extract opportunity details.
       
       Return a SINGLE JSON object with these exact keys:
       {
@@ -41,15 +41,13 @@ export class AiAgentService {
       `;
 
       try {
-          // We use geminiCall strictly for its text-processing ability
-          const { text } = await geminiCall(prompt, { grounding: false });
+          const { text } = await groqCall(prompt, { jsonMode: true });
           const data = safeParseJSON<any>(text);
           
           if (!data) throw new Error("Could not parse AI response.");
 
           // Format Date
           let deadlineDate = data.deadline;
-          // specific check if it's a valid date string, else default
           if (!deadlineDate || isNaN(new Date(deadlineDate).getTime())) {
               deadlineDate = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
           }
@@ -72,7 +70,7 @@ export class AiAgentService {
               status: "published",
               createdAt: new Date().toISOString(),
               aiConfidenceScore: sourceUrl ? 90 : 100,
-              aiReasoning: sourceUrl ? "Auto-Scanned from Web" : "Manual Admin Entry",
+              aiReasoning: sourceUrl ? "Auto-Crawled via Groq" : "Manual Admin Entry",
               sourceUrl: data.website || sourceUrl || ""
           };
 
@@ -83,63 +81,64 @@ export class AiAgentService {
   }
 
   /**
-   * AUTO-PILOT MODE: Crawls the web for opportunities
+   * AUTO-PILOT MODE: Crawls known hubs because Groq cannot Google Search.
    */
   async performAutoScan(onLog: (msg: string) => void): Promise<Opportunity[]> {
-      const currentYear = new Date().getFullYear();
-      const queries = [
-          `art grants India deadline ${currentYear}`,
-          `film festival submissions India ${currentYear}`,
-          `documentary funding for indian filmmakers ${currentYear}`,
-          `artist residencies India open call ${currentYear}`
-      ];
-
       const foundOpportunities: Opportunity[] = [];
       const processedUrls = new Set<string>();
 
-      onLog("🚀 Initializing Autonomous Agent...");
-      onLog("📅 Targeting Year: " + currentYear);
+      // Since we don't have Google Search Grounding with Groq,
+      // We use a "Seed List" strategy: Visit known aggregators/hubs and crawl them.
+      // NOTE: These are example URLs. In a real CORS environment, these might block fetch.
+      const seedHubs = [
+          { url: "https://www.filmfreeway.com", name: "FilmFreeway (Simulated)" },
+          { url: "https://film.org/grants", name: "Film Grants Hub" },
+          // Add more hubs here
+      ];
 
-      for (const query of queries) {
-          onLog(`\n🔎 Executing Search Strategy: "${query}"`);
+      onLog("🚀 Initializing Groq Autonomous Agent...");
+      onLog("ℹ️ Engine: Llama-3.3-70b-versatile");
+      onLog("🕸️ Strategy: Hub Crawling (Search Disabled)");
+
+      for (const hub of seedHubs) {
+          onLog(`\n🕷️ Visiting Hub: ${hub.name}...`);
           
           try {
-              // 1. Grounding Search
-              const { text, sources } = await geminiCall(
-                  `Find 5 distinct, currently open opportunities for: "${query}". 
-                   Return a JSON array of objects with: { "title": "...", "url": "..." }. 
-                   Ensure they are relevant to Indian citizens.`,
-                  { grounding: true }
-              );
-
-              // 2. Identify Targets
-              let targets: {url: string, title?: string}[] = [];
+              // 1. Fetch Hub Content (using WebScraperService directly is tricky for hubs due to size)
+              // Instead, we will simulate the "Discovery" of links for this demo if scraping fails,
+              // or try to scrape strictly.
               
-              // Try to parse JSON from text first
-              const jsonResults = safeParseJSON<any[]>(text);
-              if (jsonResults && Array.isArray(jsonResults)) {
-                  targets = jsonResults.map(r => ({ url: r.url || r.website, title: r.title })).filter(r => r.url);
-              }
+              // For robustness in this demo, since we can't easily scrape "FilmFreeway" homepage via proxy without issues:
+              // We will simply warn if scraping fails.
               
-              // Fallback: Use grounding sources
-              if (targets.length === 0 && sources.length > 0) {
-                   targets = sources.map(s => ({ url: s }));
+              let html = "";
+              try {
+                  html = await webScraperService.fetchUrlContent(hub.url);
+              } catch (e) {
+                  onLog(`   ⚠️ Could not fetch hub (CORS/Block): ${hub.url}`);
+                  continue;
               }
 
-              onLog(`   🎯 Found ${targets.length} potential leads.`);
+              // 2. Extract potential Links
+              // In a real crawl, we'd extract specific opportunity links.
+              // Here we try to find links that look like opportunity pages.
+              const links = webScraperService.extractLinks(html, hub.url);
+              
+              // Filter links to avoid navigation junk
+              const targetLinks = links.filter(l => l.length > 20 && (l.includes('grant') || l.includes('fest') || l.includes('apply') || l.includes('submit'))).slice(0, 3); // Limit to 3 per hub
 
-              // 3. Deep Scan (Limit to top 3 to prevent timeouts)
-              for (const target of targets.slice(0, 3)) {
-                  if (processedUrls.has(target.url)) continue;
-                  processedUrls.add(target.url);
+              onLog(`   🔗 Found ${targetLinks.length} potential leads.`);
 
-                  onLog(`   🕷️ Crawling: ${target.url.substring(0, 40)}...`);
+              // 3. Deep Scan Targets
+              for (const targetUrl of targetLinks) {
+                  if (processedUrls.has(targetUrl)) continue;
+                  processedUrls.add(targetUrl);
+
+                  onLog(`      🕵️ Deep Scanning: ${targetUrl.substring(0, 40)}...`);
                   
                   try {
-                      const html = await webScraperService.fetchUrlContent(target.url);
-                      onLog(`      ✅ Content fetched (${html.length} chars). Analyzing...`);
-                      
-                      const opp = await this.parseOpportunityText(html, target.url);
+                      const pageHtml = await webScraperService.fetchUrlContent(targetUrl);
+                      const opp = await this.parseOpportunityText(pageHtml, targetUrl);
                       
                       // Validate
                       if (opp.title && opp.title !== "Untitled Opportunity" && opp.daysLeft! > 0) {
@@ -149,19 +148,18 @@ export class AiAgentService {
                           onLog(`      ⚠️ Skipped: Irrelevant or Expired.`);
                       }
                   } catch (e: any) {
-                      onLog(`      ❌ Failed to analyze: ${e.message}`);
+                      onLog(`      ❌ Failed to analyze page: ${e.message}`);
                   }
                   
-                  // Be nice to servers
-                  await new Promise(r => setTimeout(r, 1500));
+                  await new Promise(r => setTimeout(r, 1000));
               }
 
           } catch (e: any) {
-              onLog(`   ⚠️ Search Step Failed: ${e.message}`);
+              onLog(`   ⚠️ Hub Step Failed: ${e.message}`);
           }
       }
 
-      onLog(`\n🏁 Scan Complete. Found ${foundOpportunities.length} actionable opportunities.`);
+      onLog(`\n🏁 Scan Complete. Found ${foundOpportunities.length} opportunities.`);
       return foundOpportunities;
   }
 }
