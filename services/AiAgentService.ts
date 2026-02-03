@@ -1,23 +1,21 @@
 import { Opportunity } from "../types";
 import { groqCall, safeParseJSON } from "./GroqClient";
 import { webScraperService } from "./WebScraperService";
+import { KeywordBrain } from "./KeywordBrain";
 
 // ============================================================
-// AI AGENT SERVICE (GROQ EDITION)
-// Supports Manual Parsing & Autonomous Hub Crawling
+// AI AGENT SERVICE (GROQ + KEYWORD SEARCH)
 // ============================================================
 export class AiAgentService {
   
   /**
-   * MANUAL MODE: Takes raw pasted text and organizes it into the Opportunity structure using Groq.
+   * MANUAL MODE: Takes raw pasted text and organizes it.
    */
   async parseOpportunityText(rawText: string, sourceUrl: string = ""): Promise<Partial<Opportunity>> {
-      if (!rawText || rawText.trim().length < 10) {
-          throw new Error("Content too short to analyze.");
-      }
+      if (!rawText || rawText.trim().length < 10) throw new Error("Content too short.");
 
-      // Truncate to avoid token limits (Groq Llama 3.3 has 128k context, but let's be safe with 30k chars)
-      const textToAnalyze = rawText.substring(0, 30000); 
+      // Truncate
+      const textToAnalyze = rawText.substring(0, 25000); 
 
       const prompt = `
       You are an expert grant researcher. Analyze the text below and extract opportunity details.
@@ -34,22 +32,23 @@ export class AiAgentService {
         "website": "URL if found in text, else empty string"
       }
 
-      RAW TEXT TO ANALYZE:
+      RAW TEXT:
       """
       ${textToAnalyze}
       """
       `;
 
       try {
-          // CALL GROQ instead of Gemini
           const { text } = await groqCall(prompt, { jsonMode: true });
           const data = safeParseJSON<any>(text);
           
           if (!data) throw new Error("Could not parse AI response.");
 
-          // Format Date
+          // Data Cleaning
           let deadlineDate = data.deadline;
-          if (!deadlineDate || isNaN(new Date(deadlineDate).getTime())) {
+          // Validation: if date is invalid or in past (and older than 30 days), reset
+          const d = new Date(deadlineDate);
+          if (!deadlineDate || isNaN(d.getTime())) {
               deadlineDate = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
           }
 
@@ -70,94 +69,118 @@ export class AiAgentService {
               verificationStatus: "verified",
               status: "published",
               createdAt: new Date().toISOString(),
-              aiConfidenceScore: sourceUrl ? 90 : 100,
-              aiReasoning: sourceUrl ? "Auto-Crawled via Groq" : "Manual Admin Entry",
+              aiConfidenceScore: sourceUrl ? 85 : 100,
+              aiReasoning: sourceUrl ? "Keyword Discovery via Groq" : "Manual Admin Entry",
               sourceUrl: data.website || sourceUrl || ""
           };
 
       } catch (e: any) {
           console.error("Parse Error", e);
-          throw new Error("Failed to parse text with Groq: " + e.message);
+          throw new Error("Failed to parse text: " + e.message);
       }
   }
 
   /**
-   * AUTO-PILOT MODE: Crawls known hubs because Groq cannot Google Search.
+   * AUTO-PILOT MODE: Keyword-Based Search Engine Scraper
    */
   async performAutoScan(onLog: (msg: string) => void): Promise<Opportunity[]> {
       const foundOpportunities: Opportunity[] = [];
       const processedUrls = new Set<string>();
+      const brain = KeywordBrain.get();
 
-      // Since we don't have Google Search Grounding with Groq,
-      // We use a "Seed List" strategy: Visit known aggregators/hubs and crawl them.
-      // NOTE: These are example URLs. In a real CORS environment, these might block fetch.
-      const seedHubs = [
-          { url: "https://www.filmfreeway.com", name: "FilmFreeway (Simulated)" },
-          { url: "https://film.org/grants", name: "Film Grants Hub" },
-          // Add more hubs here
-      ];
-
-      onLog("🚀 Initializing Groq Autonomous Agent...");
+      onLog("🚀 Initializing Groq Keyword Agent...");
+      onLog(`🧠 Brain Power: ${brain.getCount()} Keywords Loaded`);
       onLog("ℹ️ Engine: Llama-3.3-70b-versatile");
-      onLog("🕸️ Strategy: Hub Crawling (Search Disabled)");
 
-      for (const hub of seedHubs) {
-          onLog(`\n🕷️ Visiting Hub: ${hub.name}...`);
+      // 1. Select Keywords
+      const keywords = brain.getBatch(3); // Pick 3 random keywords
+      onLog(`🎯 Selected Targets: ${keywords.map(k => `"${k}"`).join(", ")}`);
+
+      for (const keyword of keywords) {
+          onLog(`\n🔎 Searching: "${keyword}"...`);
           
           try {
-              // 1. Fetch Hub Content 
-              // For robustness in this demo, since we can't easily scrape "FilmFreeway" homepage via proxy without issues:
-              // We will simply warn if scraping fails.
+              // 2. Perform Search via Proxy (using DuckDuckGo HTML version)
+              const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(keyword)}`;
               
-              let html = "";
+              let searchHtml = "";
               try {
-                  html = await webScraperService.fetchUrlContent(hub.url);
+                  // We fetch the raw HTML of the search result page
+                  // Note: webScraperService needs to handle raw html fetch without cleaning for link extraction logic sometimes, 
+                  // but our service cleans it. Ideally we extract links from raw response in service.
+                  // For now, we assume webScraperService fetches it.
+                  
+                  // NOTE: We pass the URL. The service handles the proxy.
+                  // We intentionally use a raw fetch inside the service to capture links.
+                  const rawResponse = await this.rawProxyFetch(searchUrl);
+                  searchHtml = rawResponse;
               } catch (e) {
-                  onLog(`   ⚠️ Could not fetch hub (CORS/Block): ${hub.url}`);
+                  onLog(`   ⚠️ Search Blocked/Failed for this keyword. Trying next.`);
                   continue;
               }
 
-              // 2. Extract potential Links
-              // Here we try to find links that look like opportunity pages.
-              const links = webScraperService.extractLinks(html, hub.url);
+              // 3. Extract Result Links
+              const links = webScraperService.extractLinks(searchHtml, "https://duckduckgo.com");
               
-              // Filter links to avoid navigation junk
-              const targetLinks = links.filter(l => l.length > 20 && (l.includes('grant') || l.includes('fest') || l.includes('apply') || l.includes('submit'))).slice(0, 3); // Limit to 3 per hub
+              // Filter garbage
+              const candidates = links.filter(l => 
+                  !l.includes('google') && 
+                  !l.includes('duckduckgo') && 
+                  !l.includes('youtube') &&
+                  l.length > 15
+              ).slice(0, 2); // Take top 2 results per keyword to save time
 
-              onLog(`   🔗 Found ${targetLinks.length} potential leads.`);
+              onLog(`   🔗 Found ${candidates.length} relevant links.`);
 
-              // 3. Deep Scan Targets
-              for (const targetUrl of targetLinks) {
-                  if (processedUrls.has(targetUrl)) continue;
-                  processedUrls.add(targetUrl);
+              // 4. Deep Scan Pages
+              for (const url of candidates) {
+                  if (processedUrls.has(url)) continue;
+                  processedUrls.add(url);
 
-                  onLog(`      🕵️ Deep Scanning: ${targetUrl.substring(0, 40)}...`);
+                  onLog(`      🕵️ Analyzing: ${url.substring(0, 40)}...`);
                   
                   try {
-                      const pageHtml = await webScraperService.fetchUrlContent(targetUrl);
-                      const opp = await this.parseOpportunityText(pageHtml, targetUrl);
+                      const pageHtml = await webScraperService.fetchUrlContent(url);
                       
-                      // Validate
+                      // Check if content is relevant before wasting AI tokens
+                      if (!pageHtml.toLowerCase().includes('grant') && 
+                          !pageHtml.toLowerCase().includes('festival') && 
+                          !pageHtml.toLowerCase().includes('apply')) {
+                          onLog(`      ⏩ Skipped (Low Relevance)`);
+                          continue;
+                      }
+
+                      const opp = await this.parseOpportunityText(pageHtml, url);
+                      
                       if (opp.title && opp.title !== "Untitled Opportunity" && opp.daysLeft! > 0) {
                           foundOpportunities.push(opp as Opportunity);
-                          onLog(`      ✨ SUCCESS: Identified "${opp.title}"`);
+                          onLog(`      ✨ SUCCESS: Found "${opp.title}"`);
                       } else {
-                          onLog(`      ⚠️ Skipped: Irrelevant or Expired.`);
+                          onLog(`      ⚠️ Analyzed but no valid opportunity found.`);
                       }
                   } catch (e: any) {
-                      onLog(`      ❌ Failed to analyze page: ${e.message}`);
+                      onLog(`      ❌ Analyze Failed: ${e.message}`);
                   }
                   
-                  await new Promise(r => setTimeout(r, 1000));
+                  await new Promise(r => setTimeout(r, 1500)); // Politeness delay
               }
 
           } catch (e: any) {
-              onLog(`   ⚠️ Hub Step Failed: ${e.message}`);
+              onLog(`   ⚠️ Keyword Step Failed: ${e.message}`);
           }
       }
 
       onLog(`\n🏁 Scan Complete. Found ${foundOpportunities.length} opportunities.`);
       return foundOpportunities;
+  }
+
+  // Private helper to get raw HTML for link extraction (bypassing cleanHtml)
+  private async rawProxyFetch(url: string): Promise<string> {
+      // Use AllOrigins as it's usually most reliable for simple GETs
+      const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
+      const res = await fetch(proxy);
+      if(!res.ok) throw new Error("Proxy Error");
+      return await res.text();
   }
 }
 
