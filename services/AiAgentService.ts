@@ -46,7 +46,6 @@ export class AiAgentService {
 
           // Data Cleaning
           let deadlineDate = data.deadline;
-          // Validation: if date is invalid or in past (and older than 30 days), reset
           const d = new Date(deadlineDate);
           if (!deadlineDate || isNaN(d.getTime())) {
               deadlineDate = new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0];
@@ -100,35 +99,28 @@ export class AiAgentService {
           onLog(`\n🔎 Searching: "${keyword}"...`);
           
           try {
-              // 2. Perform Search via Proxy (using DuckDuckGo HTML version)
-              const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(keyword)}`;
-              
+              // 2. Perform Search via DuckDuckGo Lite (HTML version is easier to parse)
+              const searchUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(keyword)}`;
               let searchHtml = "";
+              
               try {
-                  // We fetch the raw HTML of the search result page
-                  // Note: webScraperService needs to handle raw html fetch without cleaning for link extraction logic sometimes, 
-                  // but our service cleans it. Ideally we extract links from raw response in service.
-                  // For now, we assume webScraperService fetches it.
-                  
-                  // NOTE: We pass the URL. The service handles the proxy.
-                  // We intentionally use a raw fetch inside the service to capture links.
-                  const rawResponse = await this.rawProxyFetch(searchUrl);
-                  searchHtml = rawResponse;
+                  searchHtml = await webScraperService.fetchRaw(searchUrl);
               } catch (e) {
-                  onLog(`   ⚠️ Search Blocked/Failed for this keyword. Trying next.`);
+                  onLog(`   ⚠️ Search Proxy Failed. Trying backup method...`);
+                  // Backup: Try fetching a different source if needed, or skip
                   continue;
               }
 
               // 3. Extract Result Links
-              const links = webScraperService.extractLinks(searchHtml, "https://duckduckgo.com");
+              const links = webScraperService.extractLinks(searchHtml, "https://lite.duckduckgo.com");
               
               // Filter garbage
-              const candidates = links.filter(l => 
-                  !l.includes('google') && 
-                  !l.includes('duckduckgo') && 
-                  !l.includes('youtube') &&
-                  l.length > 15
-              ).slice(0, 2); // Take top 2 results per keyword to save time
+              const candidates = links.filter(l => l.length > 15).slice(0, 3);
+
+              if (candidates.length === 0) {
+                 onLog("   ⚠️ No links extracted. Search engine might be blocking proxies.");
+                 continue;
+              }
 
               onLog(`   🔗 Found ${candidates.length} relevant links.`);
 
@@ -140,29 +132,29 @@ export class AiAgentService {
                   onLog(`      🕵️ Analyzing: ${url.substring(0, 40)}...`);
                   
                   try {
-                      const pageHtml = await webScraperService.fetchUrlContent(url);
+                      // Fetch cleaned text for analysis
+                      const pageText = await webScraperService.fetchUrlContent(url);
                       
-                      // Check if content is relevant before wasting AI tokens
-                      if (!pageHtml.toLowerCase().includes('grant') && 
-                          !pageHtml.toLowerCase().includes('festival') && 
-                          !pageHtml.toLowerCase().includes('apply')) {
-                          onLog(`      ⏩ Skipped (Low Relevance)`);
+                      // Pre-check relevance
+                      const lower = pageText.toLowerCase();
+                      if (!lower.includes('grant') && !lower.includes('award') && !lower.includes('apply') && !lower.includes('submit')) {
+                          onLog(`      ⏩ Skipped (Content seems irrelevant)`);
                           continue;
                       }
 
-                      const opp = await this.parseOpportunityText(pageHtml, url);
+                      const opp = await this.parseOpportunityText(pageText, url);
                       
                       if (opp.title && opp.title !== "Untitled Opportunity" && opp.daysLeft! > 0) {
                           foundOpportunities.push(opp as Opportunity);
                           onLog(`      ✨ SUCCESS: Found "${opp.title}"`);
                       } else {
-                          onLog(`      ⚠️ Analyzed but no valid opportunity found.`);
+                          onLog(`      ⚠️ Analyzed but low confidence result.`);
                       }
                   } catch (e: any) {
                       onLog(`      ❌ Analyze Failed: ${e.message}`);
                   }
                   
-                  await new Promise(r => setTimeout(r, 1500)); // Politeness delay
+                  await new Promise(r => setTimeout(r, 1000));
               }
 
           } catch (e: any) {
@@ -172,15 +164,6 @@ export class AiAgentService {
 
       onLog(`\n🏁 Scan Complete. Found ${foundOpportunities.length} opportunities.`);
       return foundOpportunities;
-  }
-
-  // Private helper to get raw HTML for link extraction (bypassing cleanHtml)
-  private async rawProxyFetch(url: string): Promise<string> {
-      // Use AllOrigins as it's usually most reliable for simple GETs
-      const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`;
-      const res = await fetch(proxy);
-      if(!res.ok) throw new Error("Proxy Error");
-      return await res.text();
   }
 }
 
