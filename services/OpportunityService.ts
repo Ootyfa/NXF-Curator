@@ -39,14 +39,18 @@ class OpportunityService {
       try {
           const row = this.mapToDb(opp);
           
-          // Ensure status is published for manual entry
+          // Force Clean Data for Insert
+          // 1. Ensure status is strictly 'published' or 'draft'
           row.status = 'published';
           row.verification_status = 'verified';
 
-          // Sanitize Date: Postgres will throw error if date is empty string
+          // 2. Handle Dates strictly
           if (!row.deadline_date || row.deadline_date.trim() === '') {
               row.deadline_date = null;
           }
+
+          // 3. Remove undefined keys entirely
+          Object.keys(row).forEach(key => (row as any)[key] === undefined && delete (row as any)[key]);
 
           const { data, error } = await supabase
               .from('opportunities')

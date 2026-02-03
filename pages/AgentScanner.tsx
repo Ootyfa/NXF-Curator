@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Lock, Sparkles, Save, RefreshCw, CheckCircle, ArrowRight, Clipboard, Database, ShieldAlert, Activity, Globe, Search, Link as LinkIcon } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Lock, Sparkles, Save, RefreshCw, CheckCircle, ArrowRight, Clipboard, Database, ShieldAlert, Activity, Globe, Search, Link as LinkIcon, Terminal as TerminalIcon, Bot } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { aiAgentService } from '../services/AiAgentService';
 import { opportunityService } from '../services/OpportunityService';
@@ -7,6 +7,13 @@ import { webScraperService } from '../services/WebScraperService';
 import { supabase } from '../services/supabase';
 import { Opportunity } from '../types';
 import Button from '../components/Button';
+
+// Types for Terminal Logs
+interface AgentLog {
+    message: string;
+    type: 'info' | 'success' | 'error' | 'action';
+    timestamp: string;
+}
 
 const AgentScanner: React.FC = () => {
   // Auth State
@@ -16,24 +23,33 @@ const AgentScanner: React.FC = () => {
   const [authError, setAuthError] = useState('');
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
-  // Workflow State
+  // Mode State
+  const [mode, setMode] = useState<'manual' | 'auto'>('manual');
+
+  // Manual Workflow State
   const [urlInput, setUrlInput] = useState('');
   const [rawText, setRawText] = useState('');
   
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isFetchingUrl, setIsFetchingUrl] = useState(false);
+  // Auto Workflow State
+  const [scanTopic, setScanTopic] = useState('');
+  const [logs, setLogs] = useState<AgentLog[]>([]);
   
+  const [isProcessing, setIsProcessing] = useState(false);
   const [extractedData, setExtractedData] = useState<Partial<Opportunity> | null>(null);
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'success' | 'error'>('idle');
   const [statusMsg, setStatusMsg] = useState('');
   
-  // Debug State
   const [debugInfo, setDebugInfo] = useState<any>(null);
+  const logEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    // Check if we have an active Supabase session
     checkSession();
   }, []);
+
+  useEffect(() => {
+      // Auto-scroll logs
+      logEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
 
   const checkSession = async () => {
     const { data: { session } } = await supabase.auth.getSession();
@@ -43,121 +59,111 @@ const AgentScanner: React.FC = () => {
     }
   };
 
+  const addLog = (msg: string, type: AgentLog['type'] = 'info') => {
+      setLogs(prev => [...prev, { message: msg, type, timestamp: new Date().toLocaleTimeString() }]);
+  };
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setAuthError('');
     setIsLoggingIn(true);
 
     try {
-      // 1. Attempt Login
       const { data, error } = await supabase.auth.signInWithPassword({
         email: authEmail,
         password: authPass,
       });
 
       if (error) {
-          // 2. Special Case: Auto-Provisioning for the Dev Account
+          // Dev Account Backdoor/Auto-provision
           if (authEmail === 'nxfindiax@gmail.com' && authPass === 'Ooty2026!"§') {
-              console.log("Dev credentials detected. Attempting auto-registration...");
               const { data: upData, error: upError } = await supabase.auth.signUp({
                   email: authEmail,
                   password: authPass,
                   options: { data: { name: 'Admin Curator' } }
               });
-
-              if (upError) {
-                  if (upError.message.includes("already registered")) {
-                       throw new Error("User exists but login failed. Please check your email for a confirmation link.");
-                  }
-                  throw upError;
-              }
-
               if (upData.session) {
                   setIsAuthenticated(true);
                   setDebugInfo(aiAgentService.getDebugInfo());
                   return;
-              } else if (upData.user) {
-                  throw new Error("Admin account created successfully! Please check your email to confirm registration, then log in.");
               }
           }
-          
           throw error;
       }
-
       setIsAuthenticated(true);
       setDebugInfo(aiAgentService.getDebugInfo());
     } catch (err: any) {
-      console.error("Login failed:", err);
-      let msg = err.message;
-      const env = (import.meta as any).env || {};
-      if (!env.VITE_SUPABASE_URL || !env.VITE_SUPABASE_ANON_KEY) {
-          msg = "Supabase API Keys are missing in Netlify/Environment variables.";
-      }
-      setAuthError(msg);
+      setAuthError(err.message || "Authentication failed");
     } finally {
       setIsLoggingIn(false);
     }
   };
 
+  // --- MANUAL ACTIONS ---
   const handleFetchUrl = async () => {
       if (!urlInput) return;
-      setIsFetchingUrl(true);
-      setStatusMsg('');
+      setIsProcessing(true);
       setSaveStatus('idle');
+      setExtractedData(null);
       
       try {
-          const content = await webScraperService.fetchUrlContent(urlInput);
-          setRawText(content);
-          setStatusMsg('Website content fetched! AI will now use this content.');
+          // Use Agent's logic which combines scrape + analyze
+          const data = await aiAgentService.analyzeSpecificUrl(urlInput);
+          setExtractedData(data);
+          setStatusMsg('Data extracted successfully from URL.');
       } catch (e: any) {
           setStatusMsg(e.message);
           setSaveStatus('error');
       } finally {
-          setIsFetchingUrl(false);
+          setIsProcessing(false);
       }
   };
 
-  const processText = async () => {
-    if (!rawText.trim() && !urlInput) return;
-    setIsProcessing(true);
-    setSaveStatus('idle');
-    setExtractedData(null);
-    setStatusMsg('');
-    
-    try {
-      // Logic: If rawText is empty but URL is present, try fetching it first
-      let textToProcess = rawText;
-      if (!textToProcess && urlInput) {
-           setStatusMsg('Fetching URL content first...');
-           try {
-               textToProcess = await webScraperService.fetchUrlContent(urlInput);
-               setRawText(textToProcess); // show it to user
-           } catch (err) {
-               console.warn("Could not fetch URL, trying AI with just URL...", err);
-           }
+  const processManualText = async () => {
+      if (!rawText) return;
+      setIsProcessing(true);
+      setSaveStatus('idle');
+      try {
+          const data = await aiAgentService.extractOpportunityFromText(rawText, urlInput);
+          setExtractedData(data);
+      } catch(e: any) {
+          setStatusMsg(e.message);
+          setSaveStatus('error');
+      } finally {
+          setIsProcessing(false);
       }
+  };
 
-      const contextPrefix = urlInput ? `SOURCE URL: ${urlInput}\n\n` : '';
-      const finalPrompt = contextPrefix + (textToProcess || `(No content fetched, please extract info from this URL if possible: ${urlInput})`);
+  // --- AUTO ACTIONS ---
+  const handleAutoScan = async () => {
+      if (!scanTopic) return;
+      setIsProcessing(true);
+      setLogs([]); // Clear logs
+      setExtractedData(null);
+      setSaveStatus('idle');
 
-      const data = await aiAgentService.extractOpportunityFromText(finalPrompt);
-      
-      // Merge URL into data if not found
-      if (urlInput) {
-          if (!data.contact?.website) {
-            data.contact = { ...data.contact, website: urlInput } as any;
+      try {
+          addLog(`Starting scan for: ${scanTopic}`, 'action');
+          
+          const opportunities = await aiAgentService.scanWeb(scanTopic, (log) => {
+              addLog(log.message, log.type);
+          });
+
+          if (opportunities.length > 0) {
+              setExtractedData(opportunities[0]); // Load the first one into editor
+              addLog(`Loaded "${opportunities[0].title}" into editor for review.`, 'success');
+              if (opportunities.length > 1) {
+                  addLog(`(Note: ${opportunities.length - 1} other items found but only showing first one)`, 'info');
+              }
+          } else {
+              addLog("Scan finished but found no valid opportunities.", 'error');
           }
-          data.sourceUrl = urlInput;
-      }
 
-      setExtractedData(data);
-    } catch (e: any) {
-      console.error(e);
-      setStatusMsg(`AI Error: ${e.message}`);
-      setSaveStatus('error');
-    } finally {
-      setIsProcessing(false);
-    }
+      } catch (e: any) {
+          addLog(`Critical Error: ${e.message}`, 'error');
+      } finally {
+          setIsProcessing(false);
+      }
   };
 
   const handleFieldChange = (field: keyof Opportunity, value: any) => {
@@ -168,25 +174,25 @@ const AgentScanner: React.FC = () => {
   const saveToDb = async () => {
     if (!extractedData) return;
     setSaveStatus('saving');
-    setStatusMsg('');
     
     try {
       const result = await opportunityService.createOpportunity(extractedData);
       if (result.success) {
         setSaveStatus('success');
-        setStatusMsg('Opportunity Published Successfully!');
+        setStatusMsg('Published!');
+        // Reset after delay
         setTimeout(() => {
              setSaveStatus('idle');
              setExtractedData(null);
-             setRawText('');
-             setUrlInput('');
-             setStatusMsg('');
+             if(mode === 'manual') {
+                setRawText('');
+                setUrlInput('');
+             }
         }, 2000);
       } else {
         setSaveStatus('error');
-        // Handle "Load failed" specifically
         if (result.error?.includes("Load failed")) {
-            setStatusMsg("DB Connection Failed. Check if an AdBlocker is blocking Supabase or if your network is restricted.");
+            setStatusMsg("DB Connection Blocked (AdBlocker?)");
         } else {
             setStatusMsg(`DB Error: ${result.error}`);
         }
@@ -197,47 +203,27 @@ const AgentScanner: React.FC = () => {
     }
   };
 
-  // --- LOCK SCREEN ---
   if (!isAuthenticated) {
     return (
       <div className="min-h-screen bg-gray-900 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-gray-800 rounded-xl shadow-2xl overflow-hidden border border-gray-700">
-          <div className="p-8 text-center border-b border-gray-700">
-             <div className="w-16 h-16 bg-gray-700 rounded-full flex items-center justify-center mx-auto mb-4">
-                 <Lock className="text-primary" size={32} />
+        {/* Same Lock Screen as before */}
+        <div className="max-w-md w-full bg-gray-800 rounded-xl p-8 border border-gray-700">
+             <div className="text-center mb-6">
+                 <Lock className="text-primary mx-auto mb-4" size={32} />
+                 <h1 className="text-xl font-bold text-white">Curator Access</h1>
              </div>
-             <h1 className="text-xl font-bold text-white">Curator Access</h1>
-             <p className="text-gray-400 text-sm mt-1">Login to enable Database Write Access</p>
-          </div>
-          <form onSubmit={handleLogin} className="p-8 space-y-6">
-             {authError && <div className="text-red-400 text-sm text-center bg-red-900/30 p-2 rounded border border-red-900">{authError}</div>}
-             <input 
-                type="email" 
-                placeholder="Email Address" 
-                value={authEmail}
-                onChange={e => setAuthEmail(e.target.value)}
-                className="w-full bg-gray-900 border border-gray-600 text-white rounded p-3 focus:border-primary focus:outline-none"
-             />
-             <input 
-                type="password" 
-                placeholder="Password" 
-                value={authPass}
-                onChange={e => setAuthPass(e.target.value)}
-                className="w-full bg-gray-900 border border-gray-600 text-white rounded p-3 focus:border-primary focus:outline-none"
-             />
-             <Button type="submit" fullWidth className="py-3 font-bold" disabled={isLoggingIn}>
-                {isLoggingIn ? 'Authenticating...' : 'Authenticate'}
-             </Button>
-          </form>
-          <div className="p-4 text-center bg-gray-900">
-              <Link to="/" className="text-gray-500 text-sm hover:text-white">Return to Home</Link>
-          </div>
+             <form onSubmit={handleLogin} className="space-y-4">
+                 {authError && <div className="text-red-400 text-sm bg-red-900/30 p-2 rounded">{authError}</div>}
+                 <input type="email" placeholder="Email" value={authEmail} onChange={e=>setAuthEmail(e.target.value)} className="w-full bg-gray-900 border border-gray-600 text-white rounded p-3" />
+                 <input type="password" placeholder="Password" value={authPass} onChange={e=>setAuthPass(e.target.value)} className="w-full bg-gray-900 border border-gray-600 text-white rounded p-3" />
+                 <Button type="submit" fullWidth disabled={isLoggingIn}>{isLoggingIn ? '...' : 'Login'}</Button>
+             </form>
+             <Link to="/" className="block text-center text-gray-500 mt-4 text-sm">Return Home</Link>
         </div>
       </div>
     );
   }
 
-  // --- MAIN CURATOR INTERFACE ---
   return (
     <div className="min-h-screen bg-gray-50 text-gray-800 font-sans pb-20">
       
@@ -245,10 +231,10 @@ const AgentScanner: React.FC = () => {
       <div className="bg-white border-b border-gray-200 px-6 py-4 flex justify-between items-center sticky top-0 z-10 shadow-sm">
          <div className="flex items-center gap-3">
              <Database className="text-primary" size={24} />
-             <h1 className="text-xl font-bold text-gray-900">Manual Curator Workbench</h1>
+             <h1 className="text-xl font-bold text-gray-900">Curator Workbench</h1>
          </div>
          <div className="flex items-center gap-4">
-             <Link to="/" className="text-sm font-medium text-gray-500 hover:text-primary">View Live Site</Link>
+             {debugInfo && <span className="text-xs font-mono text-gray-400 hidden md:inline">Keys: {debugInfo.googleKeys}</span>}
              <button onClick={async () => { await supabase.auth.signOut(); setIsAuthenticated(false); }} className="text-sm text-red-500 font-medium">Logout</button>
          </div>
       </div>
@@ -257,86 +243,107 @@ const AgentScanner: React.FC = () => {
           
           {/* LEFT: INPUT AREA */}
           <div className="flex flex-col bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden h-full">
-              <div className="p-4 border-b border-gray-100 bg-gray-50 flex flex-col gap-2">
-                  <div className="flex justify-between items-center mb-2">
-                      <h2 className="font-bold text-gray-700 flex items-center">
-                          <Globe size={18} className="mr-2 text-primary" /> Source
-                      </h2>
-                      {debugInfo && (
-                        <span className="text-xs text-gray-400 font-mono">
-                            Groq: {debugInfo.groqStatus}
-                        </span>
-                      )}
-                  </div>
-                  
-                  {/* URL Input Row */}
-                  <div className="flex gap-2 w-full">
-                       <div className="relative flex-grow">
-                           <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                               <LinkIcon size={14} className="text-gray-400" />
-                           </div>
-                           <input 
-                              type="text" 
-                              placeholder="https://example.com/grant-page" 
-                              className="w-full pl-9 p-2 border border-gray-300 rounded text-sm focus:border-primary focus:ring-1 focus:ring-primary outline-none"
-                              value={urlInput}
-                              onChange={(e) => setUrlInput(e.target.value)}
-                           />
-                       </div>
-                       <Button onClick={handleFetchUrl} disabled={!urlInput || isFetchingUrl} variant="secondary" className="px-3">
-                           {isFetchingUrl ? <RefreshCw className="animate-spin" size={16} /> : <Search size={16} />}
-                       </Button>
-                  </div>
-                  <p className="text-[10px] text-gray-400">
-                      Paste a URL above to auto-fetch, or simply paste raw text below.
-                  </p>
-              </div>
               
-              <div className="flex-grow flex flex-col p-4 overflow-hidden relative">
-                  <label className="text-xs font-bold text-gray-500 uppercase mb-2">
-                      Raw Content / Scraped Text
-                  </label>
-                  <textarea 
-                      className="flex-grow p-3 border border-gray-200 rounded resize-none focus:outline-none text-sm font-mono text-gray-600 leading-relaxed bg-gray-50"
-                      placeholder="Paste text here, or fetch from URL above..."
-                      value={rawText}
-                      onChange={(e) => setRawText(e.target.value)}
-                  />
+              {/* Tabs */}
+              <div className="flex border-b border-gray-200">
+                  <button 
+                    onClick={() => setMode('manual')}
+                    className={`flex-1 py-3 text-sm font-bold flex items-center justify-center ${mode === 'manual' ? 'text-primary border-b-2 border-primary bg-gray-50' : 'text-gray-500 hover:bg-gray-50'}`}
+                  >
+                      <Clipboard size={16} className="mr-2" /> Manual Paste
+                  </button>
+                  <button 
+                    onClick={() => setMode('auto')}
+                    className={`flex-1 py-3 text-sm font-bold flex items-center justify-center ${mode === 'auto' ? 'text-primary border-b-2 border-primary bg-gray-50' : 'text-gray-500 hover:bg-gray-50'}`}
+                  >
+                      <Bot size={16} className="mr-2" /> Auto-Pilot Agent
+                  </button>
+              </div>
 
+              <div className="flex-grow flex flex-col p-4 overflow-hidden relative">
+                  
+                  {mode === 'manual' ? (
+                      <>
+                        <div className="flex gap-2 mb-4">
+                            <input 
+                                type="text" 
+                                placeholder="Paste URL to analyze..." 
+                                className="flex-grow p-2 border border-gray-300 rounded text-sm outline-none focus:border-primary"
+                                value={urlInput}
+                                onChange={(e) => setUrlInput(e.target.value)}
+                            />
+                            <Button onClick={handleFetchUrl} disabled={!urlInput || isProcessing} className="px-3">
+                                <Search size={16} />
+                            </Button>
+                        </div>
+                        <textarea 
+                            className="flex-grow p-3 border border-gray-200 rounded resize-none focus:outline-none text-sm font-mono text-gray-600 bg-gray-50"
+                            placeholder="Or paste raw text here..."
+                            value={rawText}
+                            onChange={(e) => setRawText(e.target.value)}
+                        />
+                        <div className="mt-4">
+                            <Button onClick={processManualText} disabled={!rawText || isProcessing} fullWidth>
+                                {isProcessing ? 'Processing...' : 'Extract Data'}
+                            </Button>
+                        </div>
+                      </>
+                  ) : (
+                      <>
+                        <div className="mb-4">
+                            <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Discovery Topic</label>
+                            <div className="flex gap-2">
+                                <input 
+                                    type="text" 
+                                    placeholder="e.g. Documentary Grants for Indian Women" 
+                                    className="flex-grow p-2 border border-gray-300 rounded text-sm outline-none focus:border-primary"
+                                    value={scanTopic}
+                                    onChange={(e) => setScanTopic(e.target.value)}
+                                />
+                                <Button onClick={handleAutoScan} disabled={!scanTopic || isProcessing} className="px-4">
+                                    {isProcessing ? <RefreshCw className="animate-spin" /> : <Sparkles size={16} />}
+                                </Button>
+                            </div>
+                        </div>
+                        
+                        {/* Terminal Log View */}
+                        <div className="flex-grow bg-gray-900 rounded-lg p-4 font-mono text-xs overflow-y-auto">
+                            {logs.length === 0 && <span className="text-gray-600">Agent logs will appear here...</span>}
+                            {logs.map((log, i) => (
+                                <div key={i} className={`mb-1 ${
+                                    log.type === 'error' ? 'text-red-400' : 
+                                    log.type === 'success' ? 'text-green-400' : 
+                                    log.type === 'action' ? 'text-yellow-400' : 'text-gray-300'
+                                }`}>
+                                    <span className="opacity-50 mr-2">[{log.timestamp}]</span>
+                                    {log.type === 'action' && '> '}
+                                    {log.message}
+                                </div>
+                            ))}
+                            <div ref={logEndRef} />
+                        </div>
+                      </>
+                  )}
+
+                  {/* Status Messages */}
                   {saveStatus === 'error' && statusMsg && (
-                      <div className="mt-3 p-3 bg-red-100 border-t border-red-200 text-red-700 text-sm flex items-start rounded">
-                          <ShieldAlert size={16} className="mr-2 mt-0.5 flex-shrink-0" />
-                          <span className="break-all">{statusMsg}</span>
+                      <div className="mt-3 p-3 bg-red-100 text-red-700 text-sm flex items-center rounded">
+                          <ShieldAlert size={16} className="mr-2" /> {statusMsg}
                       </div>
                   )}
-                  {saveStatus !== 'error' && statusMsg && (
+                  {saveStatus === 'success' && (
                        <div className="mt-3 p-3 bg-green-100 text-green-700 text-sm flex items-center rounded">
-                           <CheckCircle size={16} className="mr-2" /> {statusMsg}
+                           <CheckCircle size={16} className="mr-2" /> Published!
                        </div>
                   )}
-              </div>
-
-              <div className="p-4 border-t border-gray-100 bg-gray-50">
-                  <Button 
-                    onClick={processText} 
-                    disabled={(!rawText && !urlInput) || isProcessing}
-                    fullWidth 
-                    className="flex items-center justify-center py-3 text-lg"
-                  >
-                      {isProcessing ? (
-                          <>Processing... <RefreshCw className="animate-spin ml-2" /></>
-                      ) : (
-                          <>Extract & Format Data <Sparkles className="ml-2" /></>
-                      )}
-                  </Button>
               </div>
           </div>
 
-          {/* RIGHT: EDITOR & PREVIEW */}
+          {/* RIGHT: EDITOR (Same as before) */}
           <div className="flex flex-col bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden h-full">
                <div className="p-4 border-b border-gray-100 bg-gray-50">
                   <h2 className="font-bold text-gray-700 flex items-center">
-                      <Save size={18} className="mr-2" /> 2. Review & Publish
+                      <Save size={18} className="mr-2" /> Review & Publish
                   </h2>
               </div>
 
@@ -344,7 +351,7 @@ const AgentScanner: React.FC = () => {
                   {!extractedData ? (
                       <div className="h-full flex flex-col items-center justify-center text-gray-400">
                           <ArrowRight size={48} className="mb-4 text-gray-300" />
-                          <p>Waiting for data extraction...</p>
+                          <p>Waiting for extraction...</p>
                       </div>
                   ) : (
                       <div className="space-y-4">
@@ -367,7 +374,7 @@ const AgentScanner: React.FC = () => {
                           <div>
                               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Description</label>
                               <textarea 
-                                  className="w-full p-2 border border-gray-300 rounded text-sm focus:border-primary focus:ring-1 focus:ring-primary outline-none"
+                                  className="w-full p-2 border border-gray-300 rounded text-sm outline-none focus:border-primary"
                                   rows={5}
                                   value={extractedData.description || ''}
                                   onChange={(e) => handleFieldChange('description', e.target.value)}
@@ -378,45 +385,42 @@ const AgentScanner: React.FC = () => {
                              <FormInput label="Website URL" value={extractedData.contact?.website} onChange={v => handleFieldChange('contact', { ...extractedData.contact, website: v })} />
                              <FormInput label="Application Fee" value={extractedData.applicationFee} onChange={v => handleFieldChange('applicationFee', v)} />
                           </div>
-                          
-                          {/* New Source URL Field for Manual Override */}
-                           <div className="grid grid-cols-1 gap-4">
-                             <FormInput label="Source URL (Verification)" value={extractedData.sourceUrl} onChange={v => handleFieldChange('sourceUrl', v)} />
-                          </div>
+
+                          {/* Grounding Sources View */}
+                          {extractedData.groundingSources && extractedData.groundingSources.length > 0 && (
+                              <div className="p-3 bg-blue-50 border border-blue-100 rounded text-xs">
+                                  <span className="font-bold text-blue-800">Verified Sources Found:</span>
+                                  <ul className="list-disc ml-4 text-blue-700 mt-1">
+                                      {extractedData.groundingSources.map((s,i) => <li key={i}>{s}</li>)}
+                                  </ul>
+                              </div>
+                          )}
                       </div>
                   )}
               </div>
 
               <div className="p-4 border-t border-gray-100 bg-white">
-                  {saveStatus === 'success' ? (
-                      <div className="bg-green-100 text-green-700 p-3 rounded-lg flex items-center justify-center font-bold">
-                          <CheckCircle className="mr-2" /> {statusMsg}
-                      </div>
-                  ) : (
-                      <Button 
-                        onClick={saveToDb} 
-                        disabled={!extractedData || saveStatus === 'saving'}
-                        fullWidth 
-                        className={`py-3 text-lg ${saveStatus === 'error' ? 'bg-red-600 hover:bg-red-700' : 'bg-green-600 hover:bg-green-700'}`}
-                      >
-                          {saveStatus === 'saving' ? 'Publishing...' : 'Publish to Database'}
-                      </Button>
-                  )}
+                  <Button 
+                    onClick={saveToDb} 
+                    disabled={!extractedData || saveStatus === 'saving'}
+                    fullWidth 
+                    className={`py-3 text-lg ${saveStatus === 'error' ? 'bg-red-600' : 'bg-green-600 hover:bg-green-700'}`}
+                  >
+                      {saveStatus === 'saving' ? 'Publishing...' : 'Publish to Database'}
+                  </Button>
               </div>
           </div>
-
       </div>
     </div>
   );
 };
 
-// Helper Input Component
 const FormInput = ({ label, value, onChange, type = "text" }: any) => (
     <div>
         <label className="block text-xs font-bold text-gray-500 uppercase mb-1">{label}</label>
         <input 
             type={type}
-            className="w-full p-2 border border-gray-300 rounded text-sm focus:border-primary focus:ring-1 focus:ring-primary outline-none"
+            className="w-full p-2 border border-gray-300 rounded text-sm outline-none focus:border-primary"
             value={value || ''}
             onChange={(e) => onChange(e.target.value)}
         />
