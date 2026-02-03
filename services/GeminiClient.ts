@@ -3,7 +3,7 @@
 // GeminiClient.ts
 //
 // SINGLE source of truth for all Gemini API calls.
-// Calls ListModels FIRST to discover real model names.
+// Robust: Falls back to known models if discovery fails.
 // Zero SDK. Pure fetch().
 // ============================================================
 
@@ -72,68 +72,57 @@ class KeyManager {
 
 // ------------------------------------------------------------
 // MODEL DISCOVERY
-// Calls ListModels with the REAL key → gets REAL model list
 // ------------------------------------------------------------
 let discoveredModel: string | null = null;
 let discoveredEndpoint: string | null = null;
 
-async function discoverModel(key: string, log: (msg: string) => void): Promise<void> {
-  log("🔍 Auto-detecting best available Gemini model...");
+async function ensureModel(key: string, log: (msg: string) => void): Promise<void> {
+  if (discoveredModel && discoveredEndpoint) return;
 
-  // Prefer v1beta for Tools/Grounding support
+  log("🔍 Connecting to Gemini...");
+
   const endpoints = ["v1beta", "v1"];
-
+  
+  // 1. Try to list models (Best case: find the newest model)
   for (const ep of endpoints) {
     try {
       const res = await fetch(`${BASE}/${ep}/models?key=${key}`);
-      if (!res.ok) {
-        continue;
-      }
+      if (res.ok) {
+        const json = await res.json();
+        const models: string[] = (json.models || []).map((m: any) => m.name);
+        
+        // Priority List
+        const priority = [
+          "models/gemini-2.0-flash",
+          "models/gemini-1.5-flash",
+          "models/gemini-1.5-pro",
+        ];
 
-      const json = await res.json();
-      const models: string[] = (json.models || []).map((m: any) => m.name);
-      
-      // Priority order — pick the best one available to this key
-      const priority = [
-        "models/gemini-2.0-flash",
-        "models/gemini-2.0-flash-lite",
-        "models/gemini-1.5-flash",
-        "models/gemini-1.5-flash-latest",
-        "models/gemini-1.5-pro",
-        "models/gemini-1.5-pro-latest",
-      ];
-
-      for (const p of priority) {
-        if (models.includes(p)) {
-          discoveredModel = p.replace("models/", "");
-          discoveredEndpoint = ep;
-          log(`✅ Locked in: ${discoveredModel} (${ep})`);
-          return;
+        for (const p of priority) {
+          if (models.includes(p)) {
+            discoveredModel = p.replace("models/", "");
+            discoveredEndpoint = ep;
+            return;
+          }
+        }
+        
+        // Fallback to any flash
+        const flash = models.find(m => m.includes("flash"));
+        if (flash) {
+            discoveredModel = flash.replace("models/", "");
+            discoveredEndpoint = ep;
+            return;
         }
       }
-
-      // Fallback: first flash model in the list
-      const flash = models.find((m: string) => m.includes("flash"));
-      if (flash) {
-        discoveredModel = flash.replace("models/", "");
-        discoveredEndpoint = ep;
-        log(`✅ Locked in (fallback): ${discoveredModel} (${ep})`);
-        return;
-      }
-
-      // Last resort: first model at all
-      if (models.length > 0) {
-        discoveredModel = models[0].replace("models/", "");
-        discoveredEndpoint = ep;
-        log(`✅ Locked in (generic): ${discoveredModel} (${ep})`);
-        return;
-      }
     } catch (e) {
-      console.warn(`ListModels/${ep} error:`, e);
+      // Ignore network errors here, we'll hit fallback
     }
   }
 
-  throw new Error("❌ No compatible models found. Check API key.");
+  // 2. FALLBACK: If ListModels failed (e.g. key has no list permission), 
+  // assume gemini-1.5-flash exists on v1beta.
+  discoveredModel = "gemini-1.5-flash";
+  discoveredEndpoint = "v1beta";
 }
 
 // ------------------------------------------------------------
@@ -142,23 +131,27 @@ async function discoverModel(key: string, log: (msg: string) => void): Promise<v
 export function getDebugConfig() {
     return {
         keyCount: KeyManager.get().count(),
-        model: discoveredModel ? `${discoveredModel} (${discoveredEndpoint})` : null
+        model: discoveredModel ? `${discoveredModel} (${discoveredEndpoint})` : "Not initialized"
     };
 }
 
 export function safeParseJSON<T>(text: string): T | null {
-  const tries = [
-    text,
-    (text.match(/```(?:json)?\s*([\s\S]*?)\s*```/) || [])[1],
-    (text.match(/\[[\s\S]*\]/) || [])[0],
-    (text.match(/\{[\s\S]*\}/) || [])[0],
-  ];
-  for (const t of tries) {
-    if (!t) continue;
-    try {
-      return JSON.parse(t) as T;
-    } catch {}
+  if (!text) return null;
+  
+  // 1. Try direct parse
+  try { return JSON.parse(text) as T; } catch {}
+
+  // 2. Try markdown code blocks
+  const mdMatch = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (mdMatch) { try { return JSON.parse(mdMatch[1]) as T; } catch {} }
+
+  // 3. Try finding first { and last }
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start !== -1 && end !== -1) {
+      try { return JSON.parse(text.substring(start, end + 1)) as T; } catch {}
   }
+
   return null;
 }
 
@@ -170,33 +163,28 @@ export async function geminiCall(
   options: { grounding?: boolean; log?: (msg: string) => void } = {}
 ): Promise<{ text: string; sources: string[]; usedModel: string }> {
   const km = KeyManager.get();
-  if (km.count() === 0) throw new Error("No API keys found in .env");
+  if (km.count() === 0) throw new Error("No API keys found. Please check .env file.");
 
   const log = options.log || (() => {});
-  const maxAttempts = 5;
+  const maxAttempts = 3; // Reduced attempts to fail faster
   let lastError = "";
+  let fullErrorDetails = "";
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const key = km.pick();
     if (!key) {
-      log("⏸️ All keys cooling. Waiting 10s...");
-      await new Promise((r) => setTimeout(r, 10000));
-      km.resetAll();
+      if (km.count() === 1) {
+         // If only 1 key, waiting won't help if it's dead, but we wait for rate limits
+         await new Promise((r) => setTimeout(r, 2000));
+         km.resetAll();
+      } else {
+         km.resetAll();
+      }
       continue;
     }
 
-    // Auto-discover on first call if not ready
-    if (!discoveredModel || !discoveredEndpoint) {
-      try {
-        await discoverModel(key, log);
-      } catch (e: any) {
-        lastError = e.message;
-        continue; // Try next key/attempt
-      }
-    }
-
-    // Throttle slightly
-    await new Promise((r) => setTimeout(r, 1000));
+    // Ensure model is selected
+    await ensureModel(key, log);
 
     try {
       const url = `${BASE}/${discoveredEndpoint}/models/${discoveredModel}:generateContent?key=${key}`;
@@ -205,7 +193,7 @@ export async function geminiCall(
         contents: [{ role: "user", parts: [{ text: prompt }] }],
       };
 
-      // FIX: Use 'googleSearch' for public API v1beta
+      // Only add tools if explicitly requested AND endpoint supports it
       if (options.grounding && discoveredEndpoint === 'v1beta') {
         body.tools = [{ googleSearch: {} }];
       }
@@ -217,47 +205,59 @@ export async function geminiCall(
       });
 
       if (res.status === 429 || res.status === 503) {
-        log(`⚠️ Rate limit. Switching keys...`);
-        km.setCooldown(key, 60);
+        log(`⚠️ Rate limit (429/503). Retrying...`);
+        km.setCooldown(key, 10);
         continue;
       }
 
+      // If 404, the fallback model might be wrong.
       if (res.status === 404) {
-        log(`⚠️ 404 — Model ${discoveredModel} missing. Re-discovering...`);
-        discoveredModel = null;
-        discoveredEndpoint = null;
-        continue;
+         log(`⚠️ Model ${discoveredModel} not found (404). Retrying with different key/model...`);
+         discoveredModel = null; // Force re-discovery/reset
+         continue;
       }
+
+      const txt = await res.text();
 
       if (!res.ok) {
-        const txt = await res.text();
         try {
             const errJson = JSON.parse(txt);
-            lastError = errJson.error?.message || txt;
+            fullErrorDetails = errJson.error?.message || txt;
         } catch {
-            lastError = txt;
+            fullErrorDetails = txt;
         }
-        // log(`⚠️ HTTP ${res.status}: ${lastError}`);
+        lastError = `HTTP ${res.status}: ${fullErrorDetails.substring(0, 100)}...`;
         continue;
       }
 
       // ✅ Success
-      const json = await res.json();
-      const parts = json.candidates?.[0]?.content?.parts || [];
+      const json = JSON.parse(txt);
+      const candidates = json.candidates || [];
+      if (candidates.length === 0) {
+          // Safety block or empty response
+          if (json.promptFeedback) {
+             throw new Error(`Blocked: ${JSON.stringify(json.promptFeedback)}`);
+          }
+          throw new Error("Empty response from AI");
+      }
+
+      const parts = candidates[0].content?.parts || [];
       const text = parts.map((p: any) => p.text || "").join("");
 
       const sources: string[] = [];
-      (json.candidates?.[0]?.groundingMetadata?.groundingChunks || []).forEach(
+      (candidates[0].groundingMetadata?.groundingChunks || []).forEach(
         (c: any) => {
           if (c.web?.uri) sources.push(c.web.uri);
         }
       );
 
       return { text, sources, usedModel: discoveredModel || "unknown" };
+
     } catch (err: any) {
       lastError = err.message || String(err);
     }
   }
 
-  throw new Error(`Gemini failed after ${maxAttempts} attempts. Last: ${lastError}`);
+  // Final failure message
+  throw new Error(`${lastError} (Model: ${discoveredModel})`);
 }
