@@ -9,15 +9,15 @@ import { webScraperService } from "./WebScraperService";
 export class AiAgentService {
   
   /**
-   * MANUAL MODE: Takes raw pasted text and organizes it into the Opportunity structure.
+   * MANUAL MODE: Takes raw pasted text and organizes it into the Opportunity structure using Groq.
    */
   async parseOpportunityText(rawText: string, sourceUrl: string = ""): Promise<Partial<Opportunity>> {
       if (!rawText || rawText.trim().length < 10) {
           throw new Error("Content too short to analyze.");
       }
 
-      // Truncate to avoid token limits (Groq has limits too, though Llama 70b is generous)
-      const textToAnalyze = rawText.substring(0, 15000); 
+      // Truncate to avoid token limits (Groq Llama 3.3 has 128k context, but let's be safe with 30k chars)
+      const textToAnalyze = rawText.substring(0, 30000); 
 
       const prompt = `
       You are an expert grant researcher. Analyze the text below and extract opportunity details.
@@ -41,6 +41,7 @@ export class AiAgentService {
       `;
 
       try {
+          // CALL GROQ instead of Gemini
           const { text } = await groqCall(prompt, { jsonMode: true });
           const data = safeParseJSON<any>(text);
           
@@ -76,7 +77,7 @@ export class AiAgentService {
 
       } catch (e: any) {
           console.error("Parse Error", e);
-          throw new Error("Failed to parse text: " + e.message);
+          throw new Error("Failed to parse text with Groq: " + e.message);
       }
   }
 
@@ -104,10 +105,7 @@ export class AiAgentService {
           onLog(`\n🕷️ Visiting Hub: ${hub.name}...`);
           
           try {
-              // 1. Fetch Hub Content (using WebScraperService directly is tricky for hubs due to size)
-              // Instead, we will simulate the "Discovery" of links for this demo if scraping fails,
-              // or try to scrape strictly.
-              
+              // 1. Fetch Hub Content 
               // For robustness in this demo, since we can't easily scrape "FilmFreeway" homepage via proxy without issues:
               // We will simply warn if scraping fails.
               
@@ -120,7 +118,6 @@ export class AiAgentService {
               }
 
               // 2. Extract potential Links
-              // In a real crawl, we'd extract specific opportunity links.
               // Here we try to find links that look like opportunity pages.
               const links = webScraperService.extractLinks(html, hub.url);
               
