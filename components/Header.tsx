@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
-import { Menu, X, User, LogOut, Terminal } from 'lucide-react';
+import { Menu, X, User, LogOut, PenTool } from 'lucide-react';
 import { supabase } from '../services/supabase';
 
 const Header: React.FC = () => {
@@ -49,8 +49,8 @@ const Header: React.FC = () => {
                   to="/agent" 
                   className="flex items-center text-sm font-medium text-text hover:text-primary transition-colors bg-gray-50 px-3 py-1.5 rounded-md border border-gray-200"
                 >
-                  <Terminal size={14} className="mr-2" />
-                  Agent Dashboard
+                  <PenTool size={14} className="mr-2" />
+                  Curator Tool
                 </Link>
                 <div className="h-4 w-px bg-gray-300 mx-2"></div>
                 <div className="flex items-center text-sm font-medium text-secondary">
@@ -109,7 +109,7 @@ const Header: React.FC = () => {
                     onClick={() => setIsMenuOpen(false)}
                     className="flex items-center text-base font-medium text-secondary hover:text-primary p-2 bg-gray-50 rounded-md"
                   >
-                    <Terminal size={18} className="mr-2" /> Agent Dashboard
+                    <PenTool size={18} className="mr-2" /> Curator Tool
                   </Link>
                   <button 
                     onClick={handleSignOut}
