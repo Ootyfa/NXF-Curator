@@ -1,5 +1,6 @@
+
 import React, { useState, useEffect, useRef } from 'react';
-import { Lock, FileText, ArrowRight, Save, Database, Trash2, CheckCircle, Clipboard, Bot, Terminal, Play, Pause } from 'lucide-react';
+import { Lock, FileText, ArrowRight, Save, Database, Trash2, CheckCircle, Clipboard, Bot, Terminal, Play, Pause, Calendar, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../services/supabase';
 import { aiAgentService } from '../services/AiAgentService';
@@ -16,6 +17,10 @@ const AgentScanner: React.FC = () => {
 
   // Mode
   const [mode, setMode] = useState<'manual' | 'auto'>('manual');
+  
+  // Daily Scan Logic
+  const [lastScanDate, setLastScanDate] = useState<string | null>(null);
+  const [dailyScanAvailable, setDailyScanAvailable] = useState(false);
 
   // Tool State
   const [rawText, setRawText] = useState('');
@@ -30,6 +35,17 @@ const AgentScanner: React.FC = () => {
 
   useEffect(() => {
     checkSession();
+  }, []);
+
+  useEffect(() => {
+    // Check local storage for last scan
+    const storedDate = localStorage.getItem('nxf_last_daily_scan');
+    setLastScanDate(storedDate);
+    const today = new Date().toISOString().split('T')[0];
+    
+    if (storedDate !== today) {
+        setDailyScanAvailable(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -93,13 +109,20 @@ const AgentScanner: React.FC = () => {
 
   // --- AUTO-PILOT HANDLERS ---
 
-  const handleStartAutoScan = async () => {
+  const handleStartAutoScan = async (scanMode: 'daily' | 'deep') => {
       setIsProcessing(true);
-      setLogs(['Initializing Agent...']);
-      setFoundItems([]);
+      setLogs([`Initializing ${scanMode.toUpperCase()} Agent...`]);
+      setFoundItems([]); // Clear previous
       
+      if (scanMode === 'daily') {
+          const today = new Date().toISOString().split('T')[0];
+          localStorage.setItem('nxf_last_daily_scan', today);
+          setLastScanDate(today);
+          setDailyScanAvailable(false);
+      }
+
       try {
-          const results = await aiAgentService.performAutoScan(addLog);
+          const results = await aiAgentService.performAutoScan(addLog, { mode: scanMode });
           setFoundItems(results);
       } catch (e: any) {
           addLog(`CRITICAL ERROR: ${e.message}`);
@@ -310,22 +333,29 @@ const AgentScanner: React.FC = () => {
                 </div>
                 
                 <div className="flex-grow p-4 overflow-y-auto space-y-1">
-                    {logs.length === 0 && <span className="text-gray-600">Ready to scan. Click Start to begin.</span>}
+                    {logs.length === 0 && <span className="text-gray-600">Select a scan mode to begin.</span>}
                     {logs.map((log, i) => (
                         <div key={i} className="break-words">{log}</div>
                     ))}
                     <div ref={logsEndRef} />
                 </div>
 
-                <div className="p-4 bg-gray-950 border-t border-gray-800">
+                <div className="p-4 bg-gray-950 border-t border-gray-800 grid grid-cols-2 gap-3">
                     <Button 
-                        onClick={handleStartAutoScan}
+                        onClick={() => handleStartAutoScan('daily')}
                         disabled={isProcessing}
-                        fullWidth
-                        className={`font-mono ${isProcessing ? 'opacity-50 cursor-not-allowed' : 'hover:bg-green-600'}`}
+                        className={`font-mono text-xs ${dailyScanAvailable ? 'bg-green-600 hover:bg-green-500 animate-pulse' : 'bg-gray-800 hover:bg-gray-700 border-none'}`}
                     >
-                        {isProcessing ? <Pause size={16} className="mr-2 inline" /> : <Play size={16} className="mr-2 inline" />}
-                        {isProcessing ? 'SCANNING IN PROGRESS...' : 'START AUTONOMOUS SCAN'}
+                        {dailyScanAvailable && <Calendar size={14} className="mr-2 inline" />}
+                        {isProcessing ? 'BUSY' : 'RUN DAILY SCAN'}
+                    </Button>
+                    <Button 
+                        onClick={() => handleStartAutoScan('deep')}
+                        disabled={isProcessing}
+                        className="font-mono text-xs bg-gray-800 hover:bg-gray-700 border-none"
+                    >
+                        <RefreshCw size={14} className="mr-2 inline" />
+                        DEEP SCAN
                     </Button>
                 </div>
             </div>

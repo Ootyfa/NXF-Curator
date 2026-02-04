@@ -1,13 +1,13 @@
 
 export const webScraperService = {
-  // Proxies for raw HTML fetching (Search Engine Results)
-  // Ordered by reliability and permissive CORS headers
+  // Proxies for raw HTML fetching
   proxies: [
-    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    // CorsProxy.io is usually the most reliable for raw HTML
     (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    // AllOrigins returns JSON by default, we need to handle that or use /raw
+    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    // CodeTabs is a good fallback
     (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
-    // Fallback: This one sometimes works for simple text
-    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`,
   ],
 
   /**
@@ -16,31 +16,28 @@ export const webScraperService = {
    */
   async fetchWithJina(url: string): Promise<string> {
       try {
-          // Jina Reader is a specialized service for LLMs
           const response = await fetch(`https://r.jina.ai/${url}`, {
               headers: { 'X-No-Cache': 'true' }
           });
           if (!response.ok) throw new Error("Jina Reader API error");
           return await response.text();
       } catch (e) {
-          // Fallback to raw proxy fetch if Jina fails
           return this.fetchUrlContent(url);
       }
   },
 
   /**
-   * Fetches raw HTML via proxies (for Search Results)
+   * Fetches raw HTML via proxies with robust error handling
    */
   async fetchRaw(url: string): Promise<string> {
       let validUrl = url;
       if (!validUrl.startsWith('http')) validUrl = `https://${validUrl}`;
 
-      // Try proxies in rotation
       for (const proxyGen of this.proxies) {
         try {
           const proxyUrl = proxyGen(validUrl);
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s timeout
+          const timeoutId = setTimeout(() => controller.abort(), 15000); // 15s timeout
 
           const response = await fetch(proxyUrl, { 
               signal: controller.signal 
@@ -50,9 +47,10 @@ export const webScraperService = {
           if (!response.ok) continue;
 
           const text = await response.text();
-          // Validate: Search engines sometimes return empty 200 OK responses on bot detection
-          if (!text || text.length < 100) continue; 
-
+          
+          // Validation: Ensure we actually got HTML, not a proxy error or empty body
+          if (!text || text.length < 200) continue; 
+          
           return text;
         } catch (error) {
            // Continue to next proxy
@@ -62,7 +60,7 @@ export const webScraperService = {
   },
 
   /**
-   * Fallback Cleaner (used if Jina fails)
+   * Fallback Cleaner
    */
   async fetchUrlContent(url: string): Promise<string> {
     try {
@@ -85,22 +83,33 @@ export const webScraperService = {
 
   extractLinks(html: string, baseUrl: string): string[] {
       const links = new Set<string>();
-      // Generic regex to capture ALL href attributes
-      const regex = /href=["']([^"']+)["']/g;
+      
+      // improved regex to capture hrefs with single, double, or no quotes
+      const regex = /href=["']?([^"'>\s]+)["']?/g;
       let match;
       
       while ((match = regex.exec(html)) !== null) {
           let link = match[1];
 
-          // Handle relative links
-          if (link.startsWith('/')) {
-              try {
-                  const base = new URL(baseUrl);
-                  link = `${base.origin}${link}`;
-              } catch (e) {}
+          // Decoding HTML entities if necessary
+          link = link.replace(/&amp;/g, '&');
+
+          try {
+            // Handle relative links specifically for search engines
+            // DuckDuckGo Lite often uses relative paths like /lite/result...
+            if (link.startsWith('/')) {
+                const base = new URL(baseUrl);
+                link = `${base.origin}${link}`;
+            } else if (!link.startsWith('http')) {
+                // Handle relative paths without leading slash
+                const base = new URL(baseUrl);
+                link = new URL(link, base.href).href;
+            }
+          } catch(e) {
+             continue;
           }
 
-          // Strict filter to remove garbage and ads
+          // Strict filter to remove garbage, ads, and internal proxy links
           if (
               link.startsWith('http') && 
               !link.includes('google.') &&
@@ -113,6 +122,8 @@ export const webScraperService = {
               !link.includes('duckduckgo.') &&
               !link.includes('microsoft.') &&
               !link.includes('yahoo.') &&
+              !link.includes('corsproxy') && 
+              !link.includes('allorigins') &&
               !link.includes('.css') &&
               !link.includes('.js') &&
               !link.includes('.png') &&

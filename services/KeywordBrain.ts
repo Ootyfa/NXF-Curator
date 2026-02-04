@@ -7,8 +7,25 @@
 export class KeywordBrain {
   private static instance: KeywordBrain;
   
-  // The master list of keywords
-  private keywords: string[] = [
+  private getCurrentMonthYear(): string {
+    const date = new Date();
+    return date.toLocaleString('default', { month: 'long', year: 'numeric' });
+  }
+
+  // Keywords specifically for finding immediate/new opportunities
+  private urgentKeywords: string[] = [
+    "open call for artists India deadline {MONTH_YEAR}",
+    "film festival submission deadline India {MONTH_YEAR}",
+    "grant application India arts deadline {MONTH_YEAR}",
+    "upcoming residency deadline India {MONTH_YEAR}",
+    "new arts funding India announced {YEAR}",
+    "immediate grant for filmmakers India",
+    "short film funding India open now",
+    "call for proposals art India {YEAR}"
+  ];
+
+  // The master list of evergreen keywords
+  private standardKeywords: string[] = [
     // --- FILM & VIDEO ---
     "film grants India 2025 deadline",
     "documentary funding India open call",
@@ -159,11 +176,31 @@ export class KeywordBrain {
   }
 
   /**
-   * Returns a random set of keywords to try for a scan session.
+   * Returns a batch of keywords.
+   * @param count Number of keywords
+   * @param mode 'urgent' for time-sensitive, 'mixed' for random discovery
    */
-  getBatch(count: number = 3): string[] {
-    const shuffled = [...this.keywords].sort(() => 0.5 - Math.random());
-    return shuffled.slice(0, count);
+  getBatch(count: number = 3, mode: 'urgent' | 'mixed' = 'mixed'): string[] {
+    const monthYear = this.getCurrentMonthYear();
+    const year = new Date().getFullYear().toString();
+
+    // Prepare Urgent List (Dynamic)
+    const urgent = this.urgentKeywords.map(k => 
+      k.replace('{MONTH_YEAR}', monthYear).replace('{YEAR}', year)
+    );
+
+    if (mode === 'urgent') {
+      // Return mostly urgent keywords, shuffled
+      return urgent.sort(() => 0.5 - Math.random()).slice(0, count);
+    }
+
+    // Mixed mode: 30% urgent, 70% standard
+    const pool = [
+      ...urgent,
+      ...this.standardKeywords
+    ].sort(() => 0.5 - Math.random());
+    
+    return pool.slice(0, count);
   }
 
   /**
@@ -172,14 +209,14 @@ export class KeywordBrain {
   learn(newKeywords: string[]) {
     newKeywords.forEach(k => {
       const clean = k.trim().toLowerCase();
-      if (clean && !this.keywords.includes(clean)) {
-        this.keywords.push(clean);
+      if (clean && !this.standardKeywords.includes(clean)) {
+        this.standardKeywords.push(clean);
       }
     });
-    console.log(`🧠 Brain updated. Total keywords: ${this.keywords.length}`);
+    console.log(`🧠 Brain updated. Total keywords: ${this.standardKeywords.length + this.urgentKeywords.length}`);
   }
 
   getCount(): number {
-    return this.keywords.length;
+    return this.standardKeywords.length + this.urgentKeywords.length;
   }
 }

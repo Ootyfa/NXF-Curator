@@ -1,7 +1,13 @@
+
 import { Opportunity } from "../types";
 import { groqCall, safeParseJSON, GROQ_MODELS } from "./GroqClient";
 import { webScraperService } from "./WebScraperService";
 import { KeywordBrain } from "./KeywordBrain";
+
+interface ScanOptions {
+  mode: 'daily' | 'deep';
+  targetCount?: number;
+}
 
 // ============================================================
 // AI AGENT SERVICE (GROQ + KEYWORD SEARCH)
@@ -14,8 +20,8 @@ export class AiAgentService {
   async parseOpportunityText(rawText: string, sourceUrl: string = ""): Promise<Partial<Opportunity>> {
       if (!rawText || rawText.trim().length < 10) throw new Error("Content too short.");
 
-      // Truncate
-      const textToAnalyze = rawText.substring(0, 30000); 
+      // Truncate to avoid context window limits
+      const textToAnalyze = rawText.substring(0, 25000); 
 
       const prompt = `
       You are an expert grant researcher. Analyze the text below and extract opportunity details.
@@ -82,169 +88,176 @@ export class AiAgentService {
 
   /**
    * MEMORY BANK: High-Quality Fallback Links
-   * Used when search engines block requests.
    */
-  private getBackupLinks(): string[] {
-      return [
-        // Film & Media
+  private getBackupLinks(mode: 'daily' | 'deep'): string[] {
+      // News/Feed pages that update frequently
+      const newsSources = [
+        "https://on-the-move.org/news",
         "https://www.nfdcindia.com/schemes/",
+        "https://www.britishcouncil.in/programmes/arts/opportunities",
+        "https://khojstudios.org/opportunities/",
+        "https://indiaifa.org/grants-projects",
+        "https://ficart.org/", // Often has open calls
+        "https://prohelvetia.org.in/en/open-calls/"
+      ];
+
+      // Static pages or deep databases
+      const deepSources = [
+        "https://filmfreeway.com/festivals/curated?q=india",
         "https://www.sundance.org/apply/",
         "https://filmindependent.org/programs/",
         "https://www.docedge.nz/industry/pitch/",
-        "https://www.idfa.nl/en/info/idfa-bertha-fund",
         "https://www.berthafoundation.org/storytellers",
         "https://www.asianfilmfund.org/",
-        
-        // Visual Arts
-        "https://khojstudios.org/opportunities/",
-        "https://indiaifa.org/grants-projects",
         "https://inlaksfoundation.org/opportunities/",
         "https://serendipityarts.org/grant/",
         "https://www.pollock-krasner-foundation.org/apply",
-        "https://www.ssrf.in/opportunities/",
-        "https://whataboutart.net/residency/",
-        
-        // General / Mixed
-        "https://on-the-move.org/news",
-        "https://www.britishcouncil.in/programmes/arts/opportunities",
+        "https://www.totofundsthearts.org/",
+        "https://tifaworkingstudios.org/",
+        "http://1shanthiroad.com/",
+        "https://map-india.org/opportunities/",
         "https://www.goethe.de/ins/in/en/kul/ser/aus.html",
-        "https://prohelvetia.org.in/en/open-calls/",
-        "https://tfaindia.org/grants/",
+        "https://jfindia.org.in/",
+        "https://www.alliancefrancaise.org.in/",
         "https://www.tatatrusts.org/our-work/arts-and-culture",
-        
-        // Government
+        "https://www.asianculturalcouncil.org/our-work/grants-fellowships",
         "https://www.indiaculture.gov.in/schemes",
         "https://ccrtindia.gov.in/scholarship-scheme/",
         "https://sangeetnatak.gov.in/sna-schemes"
       ];
+
+      return mode === 'daily' ? newsSources : [...newsSources, ...deepSources];
   }
 
   /**
    * SEARCH ENGINE FAILOVER SYSTEM
    */
   private async searchWeb(keyword: string, onLog: (msg: string) => void): Promise<string[]> {
-      // 1. Try Mojeek (Crawler based, good for scraping)
-      try {
-          const url = `https://www.mojeek.com/search?q=${encodeURIComponent(keyword)}`;
-          const html = await webScraperService.fetchRaw(url);
-          const links = webScraperService.extractLinks(html, "https://www.mojeek.com");
-          if (links.length > 0) return links;
-      } catch (e) {
-          // Silent fail to next engine
-      }
-
-      // 2. Try DuckDuckGo Lite (HTML only, lighter)
       try {
           const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(keyword)}`;
           const html = await webScraperService.fetchRaw(url);
           const links = webScraperService.extractLinks(html, "https://lite.duckduckgo.com");
           if (links.length > 0) return links;
       } catch (e) {
-          // Silent fail
+         // Silent fail
       }
-
-      onLog("   ⚠️ All Search Engines blocked/failed for this keyword.");
       return [];
   }
 
   /**
-   * AUTO-PILOT MODE: Robust Scraping Logic
+   * Pre-screen content to save tokens on the large model
    */
-  async performAutoScan(onLog: (msg: string) => void): Promise<Opportunity[]> {
+  private async isRelevantContent(text: string): Promise<boolean> {
+      if (text.length < 500) return false;
+      const lower = text.toLowerCase();
+      // Basic heuristic first
+      if (!lower.includes("apply") && !lower.includes("grant") && !lower.includes("deadline") && !lower.includes("submission")) {
+          return false;
+      }
+      
+      // Use FAST model for semantic check
+      const prompt = `Does this text describe a grant, artist residency, festival submission, or funding opportunity? Reply only YES or NO.\n\nText: ${text.substring(0, 1000)}...`;
+      try {
+          const { text: answer } = await groqCall(prompt, { model: GROQ_MODELS.FAST, temperature: 0 });
+          return answer.trim().toUpperCase().includes("YES");
+      } catch {
+          return true; // Fallback to true to be safe
+      }
+  }
+
+  /**
+   * AUTO-PILOT MODE
+   * Supports 'daily' for urgent checks and 'deep' for exploration.
+   */
+  async performAutoScan(onLog: (msg: string) => void, options: ScanOptions = { mode: 'deep' }): Promise<Opportunity[]> {
       const foundOpportunities: Opportunity[] = [];
       const processedUrls = new Set<string>();
       const brain = KeywordBrain.get();
+      
+      const TARGET_COUNT = options.targetCount || 10;
+      const MAX_SCANS = options.mode === 'daily' ? 15 : 30; // Scan fewer pages in daily mode, but more targeted
 
       onLog("🚀 Initializing Agent...");
-      onLog(`🧠 Memory: ${brain.getCount()} Keywords | 📚 Backup Sites: ${this.getBackupLinks().length}`);
-      onLog("ℹ️ Engine: Llama-3.3-70b-versatile");
-
-      // 1. Gather Candidates (Search + Fallback)
-      let candidateUrls: string[] = [];
-      const keywords = brain.getBatch(3); 
+      onLog(`ℹ️ Mode: ${options.mode.toUpperCase()} Scan`);
+      
+      // 1. Keyword Selection
+      const keywordMode = options.mode === 'daily' ? 'urgent' : 'mixed';
+      const keywords = brain.getBatch(options.mode === 'daily' ? 3 : 5, keywordMode);
       
       onLog(`🎯 Targets: ${keywords.map(k => `"${k}"`).join(", ")}`);
 
-      // PHASE 1: ACTIVE SEARCH
+      // 2. Build Candidate List
+      let candidateUrls: string[] = [];
+
+      // A. Search
       for (const keyword of keywords) {
           onLog(`\n🔎 Scanning Web for: "${keyword}"...`);
           const links = await this.searchWeb(keyword, onLog);
-          
           if (links.length > 0) {
-              // Filter garbage links
               const cleanLinks = links.filter(l => l.length > 25 && !l.includes('search?') && !l.includes('google'));
-              onLog(`   🔗 Found ${cleanLinks.length} new leads.`);
+              onLog(`   🔗 Found ${cleanLinks.length} leads via Search.`);
               candidateUrls.push(...cleanLinks);
           }
       }
 
-      // PHASE 2: MEMORY BANK INJECTION (Consistency Guarantee)
-      // If we found few results (or even if we found some, mix in high-quality sources)
-      // Increased threshold to 15 to ensure we have enough to scan
-      if (candidateUrls.length < 15) {
-          onLog(`\n⚠️ Low search yield. Activating Deep Memory Bank...`);
-          const backups = this.getBackupLinks();
-          // Shuffle backups and take a good chunk
-          const shuffled = backups.sort(() => 0.5 - Math.random()).slice(0, 8);
-          candidateUrls.push(...shuffled);
-          onLog(`   📚 Added ${shuffled.length} trusted sources to scan queue.`);
-      }
-
-      // Deduplicate and Prioritize
+      // B. Backup/News Injection
+      onLog(`\n🛡️ Injecting ${options.mode === 'daily' ? 'News' : 'Deep'} Sources...`);
+      const backups = this.getBackupLinks(options.mode);
+      // Prioritize backups in daily mode
+      const backupCount = options.mode === 'daily' ? 10 : 6;
+      const shuffledBackups = backups.sort(() => 0.5 - Math.random()).slice(0, backupCount);
+      candidateUrls.push(...shuffledBackups);
+      
+      // Deduplicate
       candidateUrls = [...new Set(candidateUrls)];
 
-      if (candidateUrls.length === 0) {
-          onLog("❌ No URLs found to scan. Check network connection.");
-          return [];
-      }
-
-      // PHASE 3: DEEP SCANNING
-      // Increased MAX_SCANS to 12 to improve chances of getting 10+ items
-      const MAX_SCANS = 12; 
+      // 3. Execution Loop
       let scannedCount = 0;
-      
-      onLog(`\n🕵️ Starting Analysis on ${Math.min(candidateUrls.length, MAX_SCANS)} pages...`);
+      onLog(`\n🕵️ Analyzing content (Fast-Filter Active)...`);
 
       for (const url of candidateUrls) {
-          if (scannedCount >= MAX_SCANS) break;
+          if (foundOpportunities.length >= TARGET_COUNT) {
+              onLog(`\n🎉 Target Reached!`);
+              break;
+          }
+          if (scannedCount >= MAX_SCANS) {
+              onLog(`\n🛑 Scan Limit Reached.`);
+              break;
+          }
+
           if (processedUrls.has(url)) continue;
           processedUrls.add(url);
 
-          onLog(`   Reading: ${url.substring(0, 50)}...`);
+          onLog(`   Reading: ${url.replace('https://', '').substring(0, 35)}...`);
           
           try {
-              // Use Jina AI Reader for best text extraction
               const pageText = await webScraperService.fetchWithJina(url);
               
-              // Fast Relevance Check (Client-side)
-              const lower = pageText.toLowerCase();
-              if (!lower.includes('apply') && !lower.includes('deadline') && !lower.includes('grant') && !lower.includes('submission')) {
-                   // onLog(`      ⏩ Skipped (Low Relevance)`);
-                   continue;
+              // FAST CHECK
+              const isRelevant = await this.isRelevantContent(pageText);
+              if (!isRelevant) {
+                  // onLog(`      Skipping (Not Relevant)`);
+                  continue;
               }
 
+              // DEEP EXTRACTION (Expensive)
               const opp = await this.parseOpportunityText(pageText, url);
               
               if (opp.title && opp.title !== "Untitled Opportunity" && opp.daysLeft! > 0) {
                   foundOpportunities.push(opp as Opportunity);
                   onLog(`      ✅ MATCH: "${opp.title}"`);
-              }
+              } 
               
               scannedCount++;
               
           } catch (e: any) {
-              // onLog(`      ❌ Failed: ${e.message}`);
+               // Silent fail
           }
           
-          // Politeness delay
-          await new Promise(r => setTimeout(r, 1500)); 
+          await new Promise(r => setTimeout(r, 1000)); 
       }
 
-      if (foundOpportunities.length < 2) {
-         onLog("\n⚠️ Low successful extractions. Agent suggests retrying with different keywords.");
-      }
-
-      onLog(`\n🏁 Scan Complete. Found ${foundOpportunities.length} actionable opportunities.`);
+      onLog(`\n🏁 Scan Complete. Found ${foundOpportunities.length} opportunities.`);
       return foundOpportunities;
   }
 }
