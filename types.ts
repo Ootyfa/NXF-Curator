@@ -1,5 +1,4 @@
 
-
 export interface Opportunity {
   id: string;
   title: string;
@@ -23,6 +22,9 @@ export interface Opportunity {
     phone: string;
   };
   
+  // Social Media Content (AI Generated)
+  instagramCaption?: string;
+
   // Verification & Trust
   verificationStatus: 'verified' | 'organizer_verified' | 'draft'; // To show trust level
   sourceUrl?: string; // Where the crawler found this
@@ -36,6 +38,7 @@ export interface Opportunity {
     model: string;
     discoveryQuery: string;
     discoveryDate: string;
+    instagramCaption?: string;
   };
   
   // Workflow Status

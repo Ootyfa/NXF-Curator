@@ -1,8 +1,10 @@
+
 import React, { useEffect, useState } from 'react';
 import { useParams, Link, useLocation } from 'react-router-dom';
-import { ArrowLeft, Check, Globe, Share2, Bell, Bookmark, FileText, Target, ExternalLink, ShieldCheck, Sparkles, X, Search, CreditCard, Laptop, Facebook, Linkedin, Twitter, Clock, ThumbsUp, ThumbsDown, AlertOctagon, Info, ArrowRight, Heart, Frown } from 'lucide-react';
+import { ArrowLeft, Check, Globe, Share2, Bell, Bookmark, FileText, Target, ExternalLink, ShieldCheck, Sparkles, X, Search, CreditCard, Laptop, Facebook, Linkedin, Twitter, Clock, ThumbsUp, ThumbsDown, AlertOctagon, Info, ArrowRight, Heart, Frown, Edit, Save, Hash } from 'lucide-react';
 import Button from '../components/Button';
 import { opportunityService } from '../services/OpportunityService';
+import { supabase } from '../services/supabase';
 import { Opportunity } from '../types';
 
 const OpportunityDetail: React.FC = () => {
@@ -10,6 +12,11 @@ const OpportunityDetail: React.FC = () => {
   const location = useLocation();
   const [opportunity, setOpportunity] = useState<Opportunity | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isAdmin, setIsAdmin] = useState(false);
+  
+  // Edit Mode
+  const [editMode, setEditMode] = useState(false);
+  const [formData, setFormData] = useState<Partial<Opportunity>>({});
   
   // Interaction States
   const [isSaved, setIsSaved] = useState(false);
@@ -21,6 +28,7 @@ const OpportunityDetail: React.FC = () => {
 
   // Load Data
   useEffect(() => {
+    checkAdmin();
     const loadData = async () => {
       let currentOpp: Opportunity | undefined;
       
@@ -31,19 +39,22 @@ const OpportunityDetail: React.FC = () => {
       }
 
       setOpportunity(currentOpp || null);
-      
-      if (currentOpp) {
-        const savedState = localStorage.getItem(`nxf_saved_${currentOpp.id}`);
-        setIsSaved(savedState === 'true');
-        
-        const storedVote = localStorage.getItem(`nxf_vote_${currentOpp.id}`);
-        if(storedVote) setVoteStep('completed');
+      if(currentOpp) {
+          setFormData(currentOpp);
+          const savedState = localStorage.getItem(`nxf_saved_${currentOpp.id}`);
+          setIsSaved(savedState === 'true');
+          const storedVote = localStorage.getItem(`nxf_vote_${currentOpp.id}`);
+          if(storedVote) setVoteStep('completed');
       }
-      
       setLoading(false);
     };
     loadData();
   }, [id, location.state]);
+
+  const checkAdmin = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if(session) setIsAdmin(true);
+  };
 
   const showToast = (message: string) => {
     setToast({ message, visible: true });
@@ -73,6 +84,14 @@ const OpportunityDetail: React.FC = () => {
       await navigator.clipboard.writeText(window.location.href);
       showToast('Link copied to clipboard!');
     }
+  };
+
+  const handleAdminSave = async () => {
+      if(!id || !opportunity) return;
+      await opportunityService.organizerUpdate(id, formData);
+      setOpportunity({...opportunity, ...formData} as Opportunity);
+      setEditMode(false);
+      showToast('Changes saved successfully!');
   };
 
   const ensureAbsoluteUrl = (url: string) => {
@@ -127,15 +146,48 @@ const OpportunityDetail: React.FC = () => {
     );
   }
 
-  const DetailRow = ({ label, value }: { label: string, value: React.ReactNode }) => (
+  const DetailRow = ({ label, value, field }: { label: string, value: React.ReactNode, field?: keyof Opportunity }) => (
     <div className="mb-4">
         <span className="block text-xs font-semibold text-text uppercase tracking-wide mb-1">{label}</span>
-        <div className="text-secondary font-medium">{value}</div>
+        {editMode && field ? (
+             <input 
+                className="w-full border border-gray-300 rounded p-1 text-sm"
+                value={formData[field] as string}
+                onChange={e => setFormData({...formData, [field]: e.target.value})}
+             />
+        ) : (
+            <div className="text-secondary font-medium">{value}</div>
+        )}
     </div>
   );
 
   return (
     <div className="min-h-screen bg-background pb-12">
+      {/* ADMIN TOOLBAR */}
+      {isAdmin && (
+          <div className="bg-secondary text-white px-4 py-3 sticky top-16 z-20 flex justify-between items-center shadow-md">
+              <div className="flex items-center text-sm font-bold">
+                  <ShieldCheck size={16} className="mr-2 text-primary" /> Admin Mode
+              </div>
+              <div className="flex gap-3">
+                  {editMode ? (
+                      <>
+                        <button onClick={handleAdminSave} className="bg-primary text-white px-4 py-1.5 rounded text-sm hover:bg-accent-hover font-bold flex items-center">
+                            <Save size={14} className="mr-2" /> Save Changes
+                        </button>
+                        <button onClick={() => setEditMode(false)} className="bg-gray-700 text-white px-4 py-1.5 rounded text-sm hover:bg-gray-600">
+                            Cancel
+                        </button>
+                      </>
+                  ) : (
+                      <button onClick={() => setEditMode(true)} className="bg-white text-secondary px-4 py-1.5 rounded text-sm hover:bg-gray-100 font-bold flex items-center">
+                          <Edit size={14} className="mr-2" /> Edit Page
+                      </button>
+                  )}
+              </div>
+          </div>
+      )}
+
       <div className="max-w-3xl mx-auto px-4 py-8 sm:px-6">
         
         {/* Navigation */}
@@ -145,7 +197,7 @@ const OpportunityDetail: React.FC = () => {
         </Link>
 
         {/* Title Section */}
-        <div className="bg-white rounded-lg border border-border p-8 mb-6 shadow-card">
+        <div className="bg-white rounded-lg border border-border p-8 mb-6 shadow-card relative">
           <div className="flex flex-col gap-2 mb-4">
              <div className="flex items-center gap-2">
                  <span className="text-primary font-bold text-xs uppercase tracking-wide">{opportunity.type}</span>
@@ -155,20 +207,46 @@ const OpportunityDetail: React.FC = () => {
                     </span>
                  )}
              </div>
-             <h1 className="text-3xl font-bold text-secondary">{opportunity.title}</h1>
-             <p className="text-lg text-text">{opportunity.organizer}</p>
+             
+             {editMode ? (
+                 <input 
+                    className="text-3xl font-bold text-secondary w-full border border-gray-300 rounded p-2"
+                    value={formData.title}
+                    onChange={e => setFormData({...formData, title: e.target.value})}
+                 />
+             ) : (
+                 <h1 className="text-3xl font-bold text-secondary">{opportunity.title}</h1>
+             )}
+             
+             {editMode ? (
+                 <input 
+                    className="text-lg text-text w-full border border-gray-300 rounded p-2"
+                    value={formData.organizer}
+                    onChange={e => setFormData({...formData, organizer: e.target.value})}
+                 />
+             ) : (
+                 <p className="text-lg text-text">{opportunity.organizer}</p>
+             )}
           </div>
 
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 border-t border-border pt-6 mt-2">
               <div>
                   <span className="text-xs text-text-light block mb-1">Deadline</span>
-                  <span className={`font-semibold ${opportunity.daysLeft <= 7 ? 'text-urgent' : 'text-secondary'}`}>
-                      {opportunity.deadline}
-                  </span>
+                  {editMode ? (
+                      <input className="border rounded p-1 w-full text-sm" value={formData.deadline} onChange={e => setFormData({...formData, deadline: e.target.value})} />
+                  ) : (
+                      <span className={`font-semibold ${opportunity.daysLeft <= 7 ? 'text-urgent' : 'text-secondary'}`}>
+                          {opportunity.deadline}
+                      </span>
+                  )}
               </div>
               <div>
                   <span className="text-xs text-text-light block mb-1">Value</span>
-                  <span className="font-semibold text-secondary">{opportunity.grantOrPrize}</span>
+                  {editMode ? (
+                      <input className="border rounded p-1 w-full text-sm" value={formData.grantOrPrize} onChange={e => setFormData({...formData, grantOrPrize: e.target.value})} />
+                  ) : (
+                      <span className="font-semibold text-secondary">{opportunity.grantOrPrize}</span>
+                  )}
               </div>
               <div>
                   <span className="text-xs text-text-light block mb-1">Entry Fee</span>
@@ -187,9 +265,21 @@ const OpportunityDetail: React.FC = () => {
             
             <div className="grid md:grid-cols-2 gap-8">
                 <div>
-                     <DetailRow label="Description" value={<p className="text-sm leading-relaxed">{opportunity.description || "No description provided."}</p>} />
-                     <DetailRow label="Category" value={opportunity.category} />
-                     <DetailRow label="Event Dates" value={opportunity.eventDates || "TBD"} />
+                     <div className="mb-4">
+                        <span className="block text-xs font-semibold text-text uppercase tracking-wide mb-1">Description</span>
+                        {editMode ? (
+                            <textarea 
+                                className="w-full border border-gray-300 rounded p-2 text-sm" 
+                                rows={6}
+                                value={formData.description}
+                                onChange={e => setFormData({...formData, description: e.target.value})}
+                            />
+                        ) : (
+                            <p className="text-sm leading-relaxed">{opportunity.description || "No description provided."}</p>
+                        )}
+                     </div>
+                     <DetailRow label="Category" value={opportunity.category} field="category" />
+                     <DetailRow label="Event Dates" value={opportunity.eventDates || "TBD"} field="eventDates" />
                 </div>
                 <div>
                      <div className="mb-6">
@@ -209,22 +299,23 @@ const OpportunityDetail: React.FC = () => {
                 </div>
             </div>
 
-            {/* Google Search Grounding Links (Only if present) */}
-            {opportunity.groundingSources && opportunity.groundingSources.length > 0 && (
-                <div className="mt-8 bg-surface p-5 rounded-md border border-border text-sm">
-                    <span className="flex items-center text-xs font-bold text-secondary uppercase tracking-wide mb-2">
-                        <Globe size={14} className="mr-1 text-blue-500" /> Verified Sources
-                    </span>
-                    <ul className="space-y-2 mt-2">
-                        {opportunity.groundingSources.slice(0, 5).map((url, i) => (
-                            <li key={i}>
-                                <a href={url} target="_blank" rel="noopener noreferrer" className="flex items-center text-blue-600 hover:underline hover:text-blue-800 text-xs truncate transition-colors">
-                                    <ExternalLink size={12} className="mr-2 flex-shrink-0" />
-                                    {url}
-                                </a>
-                            </li>
-                        ))}
-                    </ul>
+            {/* AI Generated Content (Social Media) */}
+            {opportunity.instagramCaption && (
+                <div className="mt-8 bg-purple-50 p-5 rounded-md border border-purple-100">
+                    <div className="flex justify-between items-center mb-2">
+                        <span className="flex items-center text-xs font-bold text-purple-700 uppercase tracking-wide">
+                            <Hash size={14} className="mr-1" /> AI Generated Social Post
+                        </span>
+                        <button 
+                            onClick={() => {navigator.clipboard.writeText(opportunity.instagramCaption || ''); showToast('Caption copied!');}}
+                            className="text-xs text-purple-600 hover:text-purple-800 underline"
+                        >
+                            Copy Caption
+                        </button>
+                    </div>
+                    <p className="text-sm text-gray-700 italic border-l-2 border-purple-300 pl-3">
+                        {opportunity.instagramCaption}
+                    </p>
                 </div>
             )}
         </div>

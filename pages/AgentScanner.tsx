@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Lock, FileText, ArrowRight, Save, Database, Trash2, CheckCircle, Clipboard, Bot, Terminal, Play, Pause, Calendar, RefreshCw, Globe } from 'lucide-react';
+import { Lock, FileText, ArrowRight, Save, Database, Trash2, CheckCircle, Clipboard, Bot, Terminal, Play, Pause, Calendar, RefreshCw, Globe, PenTool, Hash } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../services/supabase';
 import { aiAgentService } from '../services/AiAgentService';
@@ -51,16 +51,11 @@ const AgentScanner: React.FC = () => {
             const storedDate = localStorage.getItem('nxf_last_daily_scan');
             setLastScanDate(storedDate);
 
-            // Trigger if:
-            // 1. Not currently processing
-            // 2. We haven't scanned "today" (according to local storage record)
-            // 3. It is past 6 AM IST
             if (!isProcessing && storedDate !== todayStr && currentHourIST >= 6) {
                 console.log("⏰ 6 AM IST Reached: Auto-starting Daily Deep Scan...");
                 handleStartAutoScan();
             }
         };
-        // Check immediately on mount, and then every minute
         checkAndRunAutoScan();
         const interval = setInterval(checkAndRunAutoScan, 60000);
         return () => clearInterval(interval);
@@ -134,7 +129,6 @@ const AgentScanner: React.FC = () => {
       setLogs([`Initializing Daily Deep Search (Global Mode)...`]);
       setFoundItems([]); // Clear previous
       
-      // Mark as done for today in IST
       const now = new Date();
       const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
       const istTime = new Date(utc + (3600000 * 5.5));
@@ -144,7 +138,6 @@ const AgentScanner: React.FC = () => {
       setLastScanDate(todayStr);
 
       try {
-          // Use the dedicated Daily Deep Scan method
           const results = await aiAgentService.runDailyDeepScan(addLog);
           setFoundItems(results);
       } catch (e: any) {
@@ -154,17 +147,26 @@ const AgentScanner: React.FC = () => {
       }
   };
 
-  const handleSaveFoundItem = async (opp: Opportunity, index: number) => {
-      const res = await opportunityService.createOpportunity(opp);
-      if (res.success) {
-          // Remove from found list locally
-          const newList = [...foundItems];
-          newList.splice(index, 1);
-          setFoundItems(newList);
-          addLog(`💾 Saved to Database: ${opp.title}`);
-      } else {
-          alert("Save failed: " + res.error);
-      }
+  // REJECTION HANDLER
+  const handleRejectItem = (index: number) => {
+      const newList = [...foundItems];
+      newList.splice(index, 1);
+      setFoundItems(newList);
+      // Optional: Add log or visual feedback
+      addLog(`❌ Item rejected by admin.`);
+  };
+
+  // REVIEW HANDLER (Populates Form)
+  const handleReviewItem = (opp: Opportunity, index: number) => {
+      // Remove from found list so it doesn't duplicate
+      const newList = [...foundItems];
+      newList.splice(index, 1);
+      setFoundItems(newList);
+      
+      // Load into manual form
+      setData(opp);
+      setMode('manual'); // Switch view to form
+      addLog(`📝 Loaded "${opp.title}" for review.`);
   };
 
   const handleFieldChange = (field: keyof Opportunity, value: any) => {
@@ -215,7 +217,7 @@ const AgentScanner: React.FC = () => {
                     onClick={() => setMode('manual')}
                     className={`px-4 py-1.5 rounded-md transition-all ${mode === 'manual' ? 'bg-white shadow text-primary' : 'text-gray-500 hover:text-gray-700'}`}
                 >
-                    Manual Paste
+                    Review & Publish
                 </button>
             </div>
             <button onClick={async () => { await supabase.auth.signOut(); setIsAuthenticated(false); }} className="text-sm text-red-500 font-medium">Logout</button>
@@ -265,7 +267,7 @@ const AgentScanner: React.FC = () => {
                     {!data ? (
                         <div className="h-full flex flex-col items-center justify-center text-gray-400 opacity-50">
                             <FileText size={64} className="mb-4" />
-                            <p>Waiting for text input...</p>
+                            <p>Select "Review" from Auto-Pilot or process text.</p>
                         </div>
                     ) : (
                         <div className="space-y-4">
@@ -310,6 +312,19 @@ const AgentScanner: React.FC = () => {
                                 <div>
                                     <label className="label">Description</label>
                                     <textarea className="input" rows={4} value={data.description} onChange={e => handleFieldChange('description', e.target.value)} />
+                                </div>
+                                <div className="p-3 bg-purple-50 rounded border border-purple-100">
+                                    <div className="flex items-center text-purple-700 mb-2">
+                                        <Hash size={14} className="mr-1" />
+                                        <label className="text-xs font-bold uppercase">AI Instagram Caption</label>
+                                    </div>
+                                    <textarea 
+                                        className="input bg-white text-sm" 
+                                        rows={3} 
+                                        value={data.instagramCaption} 
+                                        onChange={e => handleFieldChange('instagramCaption', e.target.value)} 
+                                        placeholder="#Opportunity #ArtGrant"
+                                    />
                                 </div>
                             </div>
                         </div>
@@ -393,7 +408,7 @@ const AgentScanner: React.FC = () => {
                         </div>
                     ) : (
                         foundItems.map((opp, idx) => (
-                            <div key={idx} className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm">
+                            <div key={idx} className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm transition-all hover:shadow-md">
                                 <h3 className="font-bold text-gray-800 text-lg mb-1">{opp.title}</h3>
                                 <p className="text-sm text-gray-600 mb-2">{opp.organizer}</p>
                                 <div className="flex flex-wrap gap-2 text-xs mb-3">
@@ -402,20 +417,28 @@ const AgentScanner: React.FC = () => {
                                     {opp.scope === 'International' && <span className="bg-purple-50 text-purple-700 px-2 py-1 rounded flex items-center"><Globe size={10} className="mr-1"/> International</span>}
                                 </div>
                                 <p className="text-sm text-gray-500 line-clamp-2 mb-3">{opp.description}</p>
-                                <div className="flex gap-2">
+                                <div className="flex gap-2 pt-2 border-t border-gray-100">
                                     <button 
-                                        onClick={() => handleSaveFoundItem(opp, idx)}
-                                        className="flex-1 bg-primary text-white py-2 rounded text-sm font-medium hover:bg-accent-hover transition-colors"
+                                        onClick={() => handleReviewItem(opp, idx)}
+                                        className="flex-1 flex items-center justify-center bg-primary text-white py-2 rounded text-sm font-medium hover:bg-accent-hover transition-colors"
                                     >
-                                        Approve & Publish
+                                        <PenTool size={14} className="mr-2" /> Review & Edit
+                                    </button>
+                                    <button
+                                        onClick={() => handleRejectItem(idx)}
+                                        className="px-3 py-2 bg-red-50 text-red-600 border border-red-100 rounded hover:bg-red-100"
+                                        title="Reject"
+                                    >
+                                        <Trash2 size={16} />
                                     </button>
                                     <a 
                                         href={opp.sourceUrl} 
                                         target="_blank" 
                                         rel="noreferrer"
                                         className="px-3 py-2 border border-gray-300 rounded text-gray-600 hover:bg-gray-50"
+                                        title="Check Source"
                                     >
-                                        Verify
+                                        <Globe size={16} />
                                     </a>
                                 </div>
                             </div>

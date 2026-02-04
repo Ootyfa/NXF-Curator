@@ -35,19 +35,23 @@ export class AiAgentService {
       const textToAnalyze = rawText.substring(0, 25000); 
 
       const prompt = `
-      You are an expert grant researcher. Analyze the text below and extract opportunity details.
+      You are an expert grant researcher for Indian filmmakers and artists. 
+      Analyze the text below and extract opportunity details.
       
-      Return a SINGLE JSON object with these exact keys:
+      CRITICAL: The opportunity MUST be open to Indian citizens. If it explicitly excludes India/Asia, mark type as "Rejected".
+
+      Return a SINGLE JSON object with these keys:
       {
-        "title": "Name of the grant/festival",
+        "title": "Name of the grant/festival (Title Case)",
         "organizer": "Who is organizing it",
-        "deadline": "YYYY-MM-DD" (if not found, guess based on context or use today + 30 days),
-        "grantOrPrize": "Value or Award details",
-        "type": "Grant" or "Residency" or "Festival" or "Lab",
-        "description": "Short summary (max 3 sentences)",
+        "deadline": "YYYY-MM-DD" (guess based on context if needed),
+        "grantOrPrize": "Value/Award (e.g. $5000, Residency)",
+        "type": "Grant" | "Residency" | "Festival" | "Lab",
+        "description": "Professional summary (max 3 sentences)",
         "eligibility": ["List", "of", "requirements"],
-        "website": "URL if found in text, else empty string",
-        "scope": "International" or "National"
+        "website": "URL if found, else empty string",
+        "scope": "International" | "National",
+        "instagramCaption": "A catchy, viral-style Instagram caption (max 280 chars) with emojis and 3-5 hashtags like #Filmmaking #ArtGrant"
       }
 
       RAW TEXT:
@@ -86,6 +90,7 @@ export class AiAgentService {
               description: data.description || "",
               eligibility: Array.isArray(data.eligibility) ? data.eligibility : [],
               contact: { website: data.website || sourceUrl || "", email: "", phone: "" },
+              instagramCaption: data.instagramCaption || "",
               verificationStatus: "verified",
               status: "published",
               createdAt: new Date().toISOString(),
@@ -221,28 +226,24 @@ export class AiAgentService {
           if (processedUrls.has(url)) continue;
           processedUrls.add(url);
 
-          // --- DEDUPLICATION CHECK ---
           const alreadyExists = await opportunityService.checkExists(null, url);
           if (alreadyExists) {
               onLog(`      Skipping (Already in DB): ${url.substring(0, 30)}...`);
-              continue; // Save API Quota
+              continue;
           }
           
           try {
               const pageText = await webScraperService.fetchWithJina(url);
               
-              // FAST CHECK
               const isRelevant = await this.isRelevantContent(pageText);
               if (!isRelevant) {
                   continue;
               }
 
-              // DEEP EXTRACTION
               onLog(`      ⚡ Analyzing: ${url.substring(0, 40)}...`);
               const opp = await this.parseOpportunityText(pageText, url);
               
               if (opp.title && opp.title !== "Untitled Opportunity" && opp.daysLeft! > 0) {
-                  // Double check title to be safe
                   const titleExists = await opportunityService.checkExists(opp.title);
                   if (titleExists) {
                       onLog(`      ⚠️ Duplicate found via Title: "${opp.title}"`);
