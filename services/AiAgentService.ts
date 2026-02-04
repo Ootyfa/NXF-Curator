@@ -4,6 +4,7 @@ import { groqCall, safeParseJSON, GROQ_MODELS } from "./GroqClient";
 import { webScraperService } from "./WebScraperService";
 import { KeywordBrain } from "./KeywordBrain";
 import { opportunityService } from "./OpportunityService";
+import { supabase } from "./supabase";
 
 interface ScanOptions {
   mode: 'daily' | 'deep';
@@ -18,6 +19,32 @@ export class AiAgentService {
   // In-memory list of concepts the admin has explicitly rejected
   private negativeConstraints: string[] = [];
 
+  constructor() {
+    this.loadMemory();
+  }
+
+  /**
+   * Initializes the agent's memory by fetching recently rejected items from the database.
+   * This ensures the agent remembers what the admin dislikes even after a page refresh.
+   */
+  private async loadMemory() {
+    try {
+        const { data } = await supabase
+            .from('opportunities')
+            .select('title')
+            .eq('status', 'rejected')
+            .order('created_at', { ascending: false })
+            .limit(20);
+
+        if (data && data.length > 0) {
+            this.negativeConstraints = data.map(d => `"${d.title}"`);
+            console.log(`🧠 AI Memory Loaded: ${this.negativeConstraints.length} negative constraints.`);
+        }
+    } catch (e) {
+        console.warn("Failed to load AI memory:", e);
+    }
+  }
+
   /**
    * LEARNING MECHANISM:
    * Takes a rejected opportunity and adds its core concept to the negative constraints.
@@ -27,19 +54,24 @@ export class AiAgentService {
       if (!opp.title) return;
       
       // 1. Persist as 'rejected' in DB so we never fetch this exact URL/Title again
-      await opportunityService.createOpportunity({
-          ...opp,
-          status: 'rejected',
-          aiReasoning: 'Rejected by Admin via Agent Scanner'
-      });
+      // We check existence first to prevent duplicate key errors if logic overlaps
+      const exists = await opportunityService.checkExists(opp.title, opp.sourceUrl);
+      if (!exists) {
+          await opportunityService.createOpportunity({
+              ...opp,
+              status: 'rejected',
+              aiReasoning: 'Rejected by Admin via Agent Scanner'
+          });
+      }
 
       // 2. Add to in-memory negative prompt for the current session
-      // We keep it short to not overflow context
-      const constraint = `"${opp.title}" (${opp.type})`;
-      this.negativeConstraints.push(constraint);
+      const constraint = `"${opp.title}"`;
+      if (!this.negativeConstraints.includes(constraint)) {
+          this.negativeConstraints.push(constraint);
+      }
       
-      // Keep only last 10 rejections to maintain speed
-      if (this.negativeConstraints.length > 10) {
+      // Keep only last 20 rejections to maintain speed/context limits
+      if (this.negativeConstraints.length > 20) {
           this.negativeConstraints.shift();
       }
 
@@ -51,6 +83,9 @@ export class AiAgentService {
    * Targets international and national opportunities.
    */
   async runDailyDeepScan(onLog: (msg: string) => void): Promise<Opportunity[]> {
+      // Refresh memory before a deep scan
+      await this.loadMemory();
+      
       return this.performAutoScan(onLog, { 
           mode: 'deep', 
           targetCount: 15 
