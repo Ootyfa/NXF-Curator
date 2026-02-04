@@ -15,12 +15,28 @@ interface ScanOptions {
 export class AiAgentService {
   
   /**
+   * SPECIALIZED: Daily 6 AM Deep Scan
+   * Targets international and national opportunities.
+   */
+  async runDailyDeepScan(onLog: (msg: string) => void): Promise<Opportunity[]> {
+      // Enforce Deep Mode parameters:
+      // - High target count (minimum 10)
+      // - Mixed keywords (International + National)
+      // - Uses Llama-3.3-70b via performAutoScan's parse logic
+      return this.performAutoScan(onLog, { 
+          mode: 'deep', 
+          targetCount: 15 // Aiming for >10
+      });
+  }
+
+  /**
    * MANUAL MODE: Takes raw pasted text and organizes it.
+   * Uses Llama-3.3-70b-versatile for high precision.
    */
   async parseOpportunityText(rawText: string, sourceUrl: string = ""): Promise<Partial<Opportunity>> {
       if (!rawText || rawText.trim().length < 10) throw new Error("Content too short.");
 
-      // Truncate to avoid context window limits
+      // Truncate to avoid context window limits (Llama 3 supports large context, but safe limit is good)
       const textToAnalyze = rawText.substring(0, 25000); 
 
       const prompt = `
@@ -35,7 +51,8 @@ export class AiAgentService {
         "type": "Grant" or "Residency" or "Festival" or "Lab",
         "description": "Short summary (max 3 sentences)",
         "eligibility": ["List", "of", "requirements"],
-        "website": "URL if found in text, else empty string"
+        "website": "URL if found in text, else empty string",
+        "scope": "International" or "National"
       }
 
       RAW TEXT:
@@ -45,10 +62,13 @@ export class AiAgentService {
       `;
 
       try {
-          // Use QUALITY model for better extraction
-          const { text } = await groqCall(prompt, { jsonMode: true, model: GROQ_MODELS.QUALITY });
-          const data = safeParseJSON<any>(text);
+          // EXCLUSIVE GROQ CALL - QUALITY MODEL
+          const { text } = await groqCall(prompt, { 
+              jsonMode: true, 
+              model: GROQ_MODELS.QUALITY 
+          });
           
+          const data = safeParseJSON<any>(text);
           if (!data) throw new Error("Could not parse AI response.");
 
           // Data Cleaning
@@ -69,6 +89,7 @@ export class AiAgentService {
               daysLeft: daysLeft > 0 ? daysLeft : 0,
               grantOrPrize: data.grantOrPrize || "See Details",
               type: data.type || "Grant",
+              scope: data.scope || "National",
               description: data.description || "",
               eligibility: Array.isArray(data.eligibility) ? data.eligibility : [],
               contact: { website: data.website || sourceUrl || "", email: "", phone: "" },
@@ -90,43 +111,27 @@ export class AiAgentService {
    * MEMORY BANK: High-Quality Fallback Links
    */
   private getBackupLinks(mode: 'daily' | 'deep'): string[] {
-      // News/Feed pages that update frequently
-      const newsSources = [
-        "https://on-the-move.org/news",
+      const globalSources = [
+          "https://on-the-move.org/news",
+          "https://resartis.org/open-calls/",
+          "https://www.transartists.org/en/call-for-artists",
+          "https://www.e-flux.com/announcements/",
+          "https://www.artandeducation.net/announcements",
+          "https://www.callforcurators.com/call-type/residencies/",
+          "https://www.artrabbit.com/artist-opportunities"
+      ];
+
+      const indiaSources = [
         "https://www.nfdcindia.com/schemes/",
         "https://www.britishcouncil.in/programmes/arts/opportunities",
         "https://khojstudios.org/opportunities/",
         "https://indiaifa.org/grants-projects",
-        "https://ficart.org/", // Often has open calls
-        "https://prohelvetia.org.in/en/open-calls/"
+        "https://ficart.org/",
+        "https://prohelvetia.org.in/en/open-calls/",
+        "https://filmfreeway.com/festivals/curated?q=india"
       ];
 
-      // Static pages or deep databases
-      const deepSources = [
-        "https://filmfreeway.com/festivals/curated?q=india",
-        "https://www.sundance.org/apply/",
-        "https://filmindependent.org/programs/",
-        "https://www.docedge.nz/industry/pitch/",
-        "https://www.berthafoundation.org/storytellers",
-        "https://www.asianfilmfund.org/",
-        "https://inlaksfoundation.org/opportunities/",
-        "https://serendipityarts.org/grant/",
-        "https://www.pollock-krasner-foundation.org/apply",
-        "https://www.totofundsthearts.org/",
-        "https://tifaworkingstudios.org/",
-        "http://1shanthiroad.com/",
-        "https://map-india.org/opportunities/",
-        "https://www.goethe.de/ins/in/en/kul/ser/aus.html",
-        "https://jfindia.org.in/",
-        "https://www.alliancefrancaise.org.in/",
-        "https://www.tatatrusts.org/our-work/arts-and-culture",
-        "https://www.asianculturalcouncil.org/our-work/grants-fellowships",
-        "https://www.indiaculture.gov.in/schemes",
-        "https://ccrtindia.gov.in/scholarship-scheme/",
-        "https://sangeetnatak.gov.in/sna-schemes"
-      ];
-
-      return mode === 'daily' ? newsSources : [...newsSources, ...deepSources];
+      return mode === 'daily' ? indiaSources : [...indiaSources, ...globalSources];
   }
 
   /**
@@ -145,20 +150,31 @@ export class AiAgentService {
   }
 
   /**
-   * Pre-screen content to save tokens on the large model
+   * Pre-screen content to save tokens on the large model.
+   * Uses Llama-3.1-8b-instant for speed.
    */
   private async isRelevantContent(text: string): Promise<boolean> {
       if (text.length < 500) return false;
       const lower = text.toLowerCase();
-      // Basic heuristic first
-      if (!lower.includes("apply") && !lower.includes("grant") && !lower.includes("deadline") && !lower.includes("submission")) {
+      
+      const requiredTerms = [
+          "apply", "grant", "deadline", "submission", "submit", "application", 
+          "proposal", "open call", "entry", "register", "audition", "fellowship", 
+          "residency", "competition", "contest", "award", "prize", "fund", "scheme"
+      ];
+      
+      const hasTerm = requiredTerms.some(term => lower.includes(term));
+      if (!hasTerm) {
           return false;
       }
       
-      // Use FAST model for semantic check
-      const prompt = `Does this text describe a grant, artist residency, festival submission, or funding opportunity? Reply only YES or NO.\n\nText: ${text.substring(0, 1000)}...`;
+      // EXCLUSIVE GROQ CALL - FAST MODEL
+      const prompt = `Does this text describe a grant, artist residency, festival submission, funding opportunity, competition, or call for proposals? Reply only YES or NO.\n\nText: ${text.substring(0, 1000)}...`;
       try {
-          const { text: answer } = await groqCall(prompt, { model: GROQ_MODELS.FAST, temperature: 0 });
+          const { text: answer } = await groqCall(prompt, { 
+              model: GROQ_MODELS.FAST, 
+              temperature: 0 
+          });
           return answer.trim().toUpperCase().includes("YES");
       } catch {
           return true; // Fallback to true to be safe
@@ -175,45 +191,45 @@ export class AiAgentService {
       const brain = KeywordBrain.get();
       
       const TARGET_COUNT = options.targetCount || 10;
-      const MAX_SCANS = options.mode === 'daily' ? 15 : 30; // Scan fewer pages in daily mode, but more targeted
+      // Deep mode scans significantly more pages to cover "www"
+      const MAX_SCANS = options.mode === 'deep' ? 50 : 20; 
 
-      onLog("🚀 Initializing Agent...");
-      onLog(`ℹ️ Mode: ${options.mode.toUpperCase()} Scan`);
+      onLog("🚀 Initializing Global Groq Agent...");
+      onLog(`ℹ️ Mode: ${options.mode.toUpperCase()} SCAN`);
       
       // 1. Keyword Selection
-      const keywordMode = options.mode === 'daily' ? 'urgent' : 'mixed';
-      const keywords = brain.getBatch(options.mode === 'daily' ? 3 : 5, keywordMode);
+      // Mixed mode ensures international keywords are picked up in deep scans
+      const keywordMode = 'mixed'; 
+      const batchSize = options.mode === 'deep' ? 25 : 10;
+      const keywords = brain.getBatch(batchSize, keywordMode);
       
-      onLog(`🎯 Targets: ${keywords.map(k => `"${k}"`).join(", ")}`);
+      onLog(`🎯 Targets (${keywords.length}): ${keywords.slice(0, 3).map(k => `"${k}"`).join(", ")} and ${keywords.length - 3} more...`);
 
       // 2. Build Candidate List
       let candidateUrls: string[] = [];
 
       // A. Search
       for (const keyword of keywords) {
-          onLog(`\n🔎 Scanning Web for: "${keyword}"...`);
+          onLog(`\n🔎 Scanning World Wide Web for: "${keyword}"...`);
           const links = await this.searchWeb(keyword, onLog);
           if (links.length > 0) {
               const cleanLinks = links.filter(l => l.length > 25 && !l.includes('search?') && !l.includes('google'));
-              onLog(`   🔗 Found ${cleanLinks.length} leads via Search.`);
               candidateUrls.push(...cleanLinks);
           }
       }
 
-      // B. Backup/News Injection
-      onLog(`\n🛡️ Injecting ${options.mode === 'daily' ? 'News' : 'Deep'} Sources...`);
+      // B. Backup Sources
+      onLog(`\n🛡️ Scanning Global Opportunity Databases...`);
       const backups = this.getBackupLinks(options.mode);
-      // Prioritize backups in daily mode
-      const backupCount = options.mode === 'daily' ? 10 : 6;
-      const shuffledBackups = backups.sort(() => 0.5 - Math.random()).slice(0, backupCount);
-      candidateUrls.push(...shuffledBackups);
+      candidateUrls.push(...backups);
       
       // Deduplicate
       candidateUrls = [...new Set(candidateUrls)];
+      onLog(`\n📋 Queue: ${candidateUrls.length} unique URLs found.`);
 
       // 3. Execution Loop
       let scannedCount = 0;
-      onLog(`\n🕵️ Analyzing content (Fast-Filter Active)...`);
+      onLog(`\n🕵️ Analyzing content (Model: ${GROQ_MODELS.FAST.replace('llama-3.1-', '')} for filter, ${GROQ_MODELS.QUALITY.replace('llama-3.3-', '')} for extraction)...`);
 
       for (const url of candidateUrls) {
           if (foundOpportunities.length >= TARGET_COUNT) {
@@ -221,31 +237,31 @@ export class AiAgentService {
               break;
           }
           if (scannedCount >= MAX_SCANS) {
-              onLog(`\n🛑 Scan Limit Reached.`);
+              onLog(`\n🛑 Scan Limit Reached (${MAX_SCANS} pages).`);
               break;
           }
 
           if (processedUrls.has(url)) continue;
           processedUrls.add(url);
 
-          onLog(`   Reading: ${url.replace('https://', '').substring(0, 35)}...`);
+          // onLog(`   Reading: ${url.replace('https://', '').substring(0, 40)}...`);
           
           try {
               const pageText = await webScraperService.fetchWithJina(url);
               
-              // FAST CHECK
+              // FAST CHECK (Llama 3.1 8b)
               const isRelevant = await this.isRelevantContent(pageText);
               if (!isRelevant) {
-                  // onLog(`      Skipping (Not Relevant)`);
                   continue;
               }
 
-              // DEEP EXTRACTION (Expensive)
+              // DEEP EXTRACTION (Llama 3.3 70b)
+              onLog(`      ⚡ Extraction in progress: ${url.substring(0, 50)}...`);
               const opp = await this.parseOpportunityText(pageText, url);
               
               if (opp.title && opp.title !== "Untitled Opportunity" && opp.daysLeft! > 0) {
                   foundOpportunities.push(opp as Opportunity);
-                  onLog(`      ✅ MATCH: "${opp.title}"`);
+                  onLog(`      ✅ MATCH: "${opp.title}" (${opp.scope})`);
               } 
               
               scannedCount++;

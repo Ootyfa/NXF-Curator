@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Lock, FileText, ArrowRight, Save, Database, Trash2, CheckCircle, Clipboard, Bot, Terminal, Play, Pause, Calendar, RefreshCw } from 'lucide-react';
+import { Lock, FileText, ArrowRight, Save, Database, Trash2, CheckCircle, Clipboard, Bot, Terminal, Play, Pause, Calendar, RefreshCw, Globe } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../services/supabase';
 import { aiAgentService } from '../services/AiAgentService';
@@ -16,11 +16,10 @@ const AgentScanner: React.FC = () => {
   const [authError, setAuthError] = useState('');
 
   // Mode
-  const [mode, setMode] = useState<'manual' | 'auto'>('manual');
+  const [mode, setMode] = useState<'manual' | 'auto'>('auto');
   
   // Daily Scan Logic
   const [lastScanDate, setLastScanDate] = useState<string | null>(null);
-  const [dailyScanAvailable, setDailyScanAvailable] = useState(false);
 
   // Tool State
   const [rawText, setRawText] = useState('');
@@ -37,16 +36,36 @@ const AgentScanner: React.FC = () => {
     checkSession();
   }, []);
 
+  // AUTOMATIC TRIGGER LOGIC (6 AM IST)
   useEffect(() => {
-    // Check local storage for last scan
-    const storedDate = localStorage.getItem('nxf_last_daily_scan');
-    setLastScanDate(storedDate);
-    const today = new Date().toISOString().split('T')[0];
-    
-    if (storedDate !== today) {
-        setDailyScanAvailable(true);
+    if (isAuthenticated && mode === 'auto') {
+        const checkAndRunAutoScan = async () => {
+            const now = new Date();
+            // Calculate IST time (UTC + 5.5 hours)
+            const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+            const istTime = new Date(utc + (3600000 * 5.5));
+            
+            const todayStr = istTime.toISOString().split('T')[0]; // YYYY-MM-DD in IST
+            const currentHourIST = istTime.getHours();
+
+            const storedDate = localStorage.getItem('nxf_last_daily_scan');
+            setLastScanDate(storedDate);
+
+            // Trigger if:
+            // 1. Not currently processing
+            // 2. We haven't scanned "today" (according to local storage record)
+            // 3. It is past 6 AM IST
+            if (!isProcessing && storedDate !== todayStr && currentHourIST >= 6) {
+                console.log("⏰ 6 AM IST Reached: Auto-starting Daily Deep Scan...");
+                handleStartAutoScan();
+            }
+        };
+        // Check immediately on mount, and then every minute
+        checkAndRunAutoScan();
+        const interval = setInterval(checkAndRunAutoScan, 60000);
+        return () => clearInterval(interval);
     }
-  }, []);
+  }, [isAuthenticated, mode, isProcessing]);
 
   useEffect(() => {
       logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -109,20 +128,24 @@ const AgentScanner: React.FC = () => {
 
   // --- AUTO-PILOT HANDLERS ---
 
-  const handleStartAutoScan = async (scanMode: 'daily' | 'deep') => {
+  const handleStartAutoScan = async () => {
+      if (isProcessing) return;
       setIsProcessing(true);
-      setLogs([`Initializing ${scanMode.toUpperCase()} Agent...`]);
+      setLogs([`Initializing Daily Deep Search (Global Mode)...`]);
       setFoundItems([]); // Clear previous
       
-      if (scanMode === 'daily') {
-          const today = new Date().toISOString().split('T')[0];
-          localStorage.setItem('nxf_last_daily_scan', today);
-          setLastScanDate(today);
-          setDailyScanAvailable(false);
-      }
+      // Mark as done for today in IST
+      const now = new Date();
+      const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+      const istTime = new Date(utc + (3600000 * 5.5));
+      const todayStr = istTime.toISOString().split('T')[0];
+      
+      localStorage.setItem('nxf_last_daily_scan', todayStr);
+      setLastScanDate(todayStr);
 
       try {
-          const results = await aiAgentService.performAutoScan(addLog, { mode: scanMode });
+          // Use the dedicated Daily Deep Scan method
+          const results = await aiAgentService.runDailyDeepScan(addLog);
           setFoundItems(results);
       } catch (e: any) {
           addLog(`CRITICAL ERROR: ${e.message}`);
@@ -183,16 +206,16 @@ const AgentScanner: React.FC = () => {
          <div className="flex items-center gap-4">
             <div className="bg-gray-100 p-1 rounded-lg flex text-sm font-medium">
                 <button 
-                    onClick={() => setMode('manual')}
-                    className={`px-4 py-1.5 rounded-md transition-all ${mode === 'manual' ? 'bg-white shadow text-primary' : 'text-gray-500 hover:text-gray-700'}`}
-                >
-                    Manual Paste
-                </button>
-                <button 
                     onClick={() => setMode('auto')}
                     className={`px-4 py-1.5 rounded-md transition-all ${mode === 'auto' ? 'bg-white shadow text-primary' : 'text-gray-500 hover:text-gray-700'}`}
                 >
                     Auto-Pilot
+                </button>
+                <button 
+                    onClick={() => setMode('manual')}
+                    className={`px-4 py-1.5 rounded-md transition-all ${mode === 'manual' ? 'bg-white shadow text-primary' : 'text-gray-500 hover:text-gray-700'}`}
+                >
+                    Manual Paste
                 </button>
             </div>
             <button onClick={async () => { await supabase.auth.signOut(); setIsAuthenticated(false); }} className="text-sm text-red-500 font-medium">Logout</button>
@@ -321,11 +344,11 @@ const AgentScanner: React.FC = () => {
                 <div className="p-4 border-b border-gray-800 bg-gray-950 flex justify-between items-center">
                     <div className="flex items-center gap-2">
                         <Terminal size={16} />
-                        <span className="font-bold">Agent Terminal</span>
+                        <span className="font-bold">Global Agent Terminal</span>
                     </div>
                     {isProcessing ? (
                         <span className="flex items-center text-xs text-yellow-500 animate-pulse">
-                            <Bot size={14} className="mr-1" /> RUNNING...
+                            <Bot size={14} className="mr-1" /> DEEP SCANNING...
                         </span>
                     ) : (
                         <span className="text-xs text-gray-500">IDLE</span>
@@ -333,29 +356,24 @@ const AgentScanner: React.FC = () => {
                 </div>
                 
                 <div className="flex-grow p-4 overflow-y-auto space-y-1">
-                    {logs.length === 0 && <span className="text-gray-600">Select a scan mode to begin.</span>}
+                    {logs.length === 0 && <span className="text-gray-600">Waiting for 6:00 AM daily trigger or manual start...</span>}
                     {logs.map((log, i) => (
                         <div key={i} className="break-words">{log}</div>
                     ))}
                     <div ref={logsEndRef} />
                 </div>
 
-                <div className="p-4 bg-gray-950 border-t border-gray-800 grid grid-cols-2 gap-3">
+                <div className="p-4 bg-gray-950 border-t border-gray-800 grid grid-cols-1">
                     <Button 
-                        onClick={() => handleStartAutoScan('daily')}
+                        onClick={() => handleStartAutoScan()}
                         disabled={isProcessing}
-                        className={`font-mono text-xs ${dailyScanAvailable ? 'bg-green-600 hover:bg-green-500 animate-pulse' : 'bg-gray-800 hover:bg-gray-700 border-none'}`}
+                        className={`font-mono text-xs ${isProcessing ? 'bg-gray-800' : 'bg-green-700 hover:bg-green-600 border-none'}`}
                     >
-                        {dailyScanAvailable && <Calendar size={14} className="mr-2 inline" />}
-                        {isProcessing ? 'BUSY' : 'RUN DAILY SCAN'}
-                    </Button>
-                    <Button 
-                        onClick={() => handleStartAutoScan('deep')}
-                        disabled={isProcessing}
-                        className="font-mono text-xs bg-gray-800 hover:bg-gray-700 border-none"
-                    >
-                        <RefreshCw size={14} className="mr-2 inline" />
-                        DEEP SCAN
+                        {isProcessing ? (
+                             <><RefreshCw size={14} className="mr-2 inline animate-spin" /> SCANNING WORLD WIDE WEB...</>
+                        ) : (
+                             <><Globe size={14} className="mr-2 inline" /> FORCE START GLOBAL DEEP SCAN</>
+                        )}
                     </Button>
                 </div>
             </div>
@@ -381,6 +399,7 @@ const AgentScanner: React.FC = () => {
                                 <div className="flex flex-wrap gap-2 text-xs mb-3">
                                     <span className="bg-blue-50 text-blue-700 px-2 py-1 rounded">Deadline: {opp.deadline}</span>
                                     <span className="bg-yellow-50 text-yellow-700 px-2 py-1 rounded">{opp.type}</span>
+                                    {opp.scope === 'International' && <span className="bg-purple-50 text-purple-700 px-2 py-1 rounded flex items-center"><Globe size={10} className="mr-1"/> International</span>}
                                 </div>
                                 <p className="text-sm text-gray-500 line-clamp-2 mb-3">{opp.description}</p>
                                 <div className="flex gap-2">

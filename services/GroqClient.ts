@@ -1,16 +1,16 @@
+
 // ============================================================
 // GroqClient.ts
 //
 // SINGLE source of truth for Groq API calls.
-// Now supports model selection for performance vs quality.
-// Includes Rate Limiting and Backoff strategies.
+// Optimized for Llama 3.1 (Speed) and Llama 3.3 (Quality)
 // ============================================================
 
 const BASE = "https://api.groq.com/openai/v1/chat/completions";
 
 export const GROQ_MODELS = {
-  FAST: "llama-3.1-8b-instant",     // Good for simple summaries, chat
-  QUALITY: "llama-3.3-70b-versatile" // Best for complex extraction, JSON
+  FAST: "llama-3.1-8b-instant",      // Lightning fast for filtering & simple checks
+  QUALITY: "llama-3.3-70b-versatile" // High intelligence for JSON extraction & reasoning
 };
 
 // ------------------------------------------------------------
@@ -92,20 +92,19 @@ export async function groqCall(
   if (km.count() === 0) throw new Error("No Groq API keys found. Please check .env file.");
 
   // Intelligent Model Selection:
-  // If jsonMode is true, we likely need the reasoning/extraction power of 70b (QUALITY).
-  // Otherwise, we default to 8b (FAST) for speed and efficiency.
+  // If jsonMode is true, we use the 70b QUALITY model for precision.
+  // Otherwise, we default to the 8b FAST model for speed.
   const defaultModel = options.jsonMode ? GROQ_MODELS.QUALITY : GROQ_MODELS.FAST;
   const model = options.model || defaultModel;
 
   // Parameter Tuning
   // For QUALITY/Extraction tasks (Llama 3.3 70b), we want high determinism (low temp)
-  // For FAST/Creative tasks (Llama 3.1 8b), we can allow slightly more freedom
   const defaultTemp = model === GROQ_MODELS.QUALITY ? 0.0 : 0.6;
   const temperature = options.temperature ?? defaultTemp;
   const topP = options.topP ?? 0.9;
 
   let attempt = 0;
-  const maxRetries = 3;
+  const maxRetries = 5; // Increased retries for robustness
   let lastError: any;
 
   while (attempt <= maxRetries) {
@@ -139,15 +138,16 @@ export async function groqCall(
       // Handle Rate Limiting (429)
       if (res.status === 429) {
           const retryAfterHeader = res.headers.get("Retry-After");
-          let waitTime = 2000 * Math.pow(2, attempt); // Default exponential backoff: 2s, 4s, 8s, 16s
+          let waitTime = 2000 * Math.pow(2, attempt); // Exponential backoff
           
           if (retryAfterHeader) {
              const seconds = parseInt(retryAfterHeader, 10);
              if (!isNaN(seconds)) waitTime = seconds * 1000;
           }
           
-          // Cap wait time at 30 seconds to avoid hanging too long
-          waitTime = Math.min(waitTime, 30000);
+          // Add Jitter
+          waitTime = waitTime + Math.random() * 1000;
+          waitTime = Math.min(waitTime, 60000); // Max 60s wait
 
           if (options.log) options.log(`Rate limit hit. Retrying in ${Math.round(waitTime/1000)}s...`);
           console.warn(`[Groq] Rate Limit 429. Retrying in ${waitTime}ms...`);
@@ -158,14 +158,11 @@ export async function groqCall(
       }
 
       if (!res.ok) {
-          // If server error (5xx), we retry. If client error (4xx), we throw unless it's 429 handled above.
           if (res.status >= 500) {
-              console.warn(`[Groq] Server Error ${res.status}. Retrying...`);
               await delay(1000 * Math.pow(2, attempt));
               attempt++;
               continue;
           }
-
           const txt = await res.text();
           throw new Error(`Groq API Error (${res.status}): ${txt}`);
       }
@@ -177,7 +174,6 @@ export async function groqCall(
 
     } catch (err: any) {
       lastError = err;
-      console.warn(`[Groq] Attempt ${attempt + 1} failed: ${err.message}`);
       
       // Stop retrying on auth errors
       if (err.message.includes("401") || err.message.includes("403")) {
