@@ -14,13 +14,19 @@ class OpportunityService {
       .neq('status', 'removed_by_organizer')
       .order('deadline_date', { ascending: true });
 
-    if (error || !data || data.length === 0) {
+    if (error) {
+      console.warn("Supabase fetch failed (using mock data):", error.message);
       return MOCK_DATA;
     }
-    return data.map(this.mapFromDb);
+
+    if (!data || data.length === 0) {
+      return MOCK_DATA;
+    }
+    return data.map((row) => this.mapFromDb(row));
   }
 
   async getById(id: string): Promise<Opportunity | undefined> {
+    // Check mock first for static data consistency during demos
     const mock = MOCK_DATA.find(o => o.id === id);
     if (mock) return mock;
 
@@ -96,12 +102,23 @@ class OpportunityService {
     // Extract social content from metadata if present
     const aiMeta = row.ai_metadata || {};
     
+    // Calculate daysLeft dynamically
+    let daysLeft = 0;
+    if (row.deadline_date) {
+        const today = new Date();
+        const deadline = new Date(row.deadline_date);
+        today.setHours(0,0,0,0);
+        deadline.setHours(0,0,0,0);
+        const diffTime = deadline.getTime() - today.getTime();
+        daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+    }
+
     return {
       id: row.id,
       title: row.title || "Untitled",
       deadline: row.deadline_text || row.deadline || "TBD",
       deadlineDate: row.deadline_date,
-      daysLeft: row.daysLeft || 0,
+      daysLeft: daysLeft,
       organizer: row.organizer || "Unknown",
       grantOrPrize: row.grant_or_prize || "N/A",
       eligibility: row.eligibility || [],
@@ -124,7 +141,7 @@ class OpportunityService {
       instagramCaption: aiMeta.instagramCaption, // Map from metadata
       status: row.status || 'draft',
       userFeedback: row.user_feedback,
-      lastEditedBy: row.last_edited_by, // Mapped
+      lastEditedBy: row.last_edited_by,
     };
   }
 
@@ -158,7 +175,7 @@ class OpportunityService {
       ai_reasoning: opp.aiReasoning,
       ai_metadata: combinedMetadata,
       status: opp.status,
-      last_edited_by: opp.lastEditedBy, // Mapped
+      last_edited_by: opp.lastEditedBy,
     };
   }
   
