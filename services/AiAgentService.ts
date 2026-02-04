@@ -3,6 +3,7 @@ import { Opportunity } from "../types";
 import { groqCall, safeParseJSON, GROQ_MODELS } from "./GroqClient";
 import { webScraperService } from "./WebScraperService";
 import { KeywordBrain } from "./KeywordBrain";
+import { opportunityService } from "./OpportunityService";
 
 interface ScanOptions {
   mode: 'daily' | 'deep';
@@ -19,24 +20,18 @@ export class AiAgentService {
    * Targets international and national opportunities.
    */
   async runDailyDeepScan(onLog: (msg: string) => void): Promise<Opportunity[]> {
-      // Enforce Deep Mode parameters:
-      // - High target count (minimum 10)
-      // - Mixed keywords (International + National)
-      // - Uses Llama-3.3-70b via performAutoScan's parse logic
       return this.performAutoScan(onLog, { 
           mode: 'deep', 
-          targetCount: 15 // Aiming for >10
+          targetCount: 15 
       });
   }
 
   /**
    * MANUAL MODE: Takes raw pasted text and organizes it.
-   * Uses Llama-3.3-70b-versatile for high precision.
    */
   async parseOpportunityText(rawText: string, sourceUrl: string = ""): Promise<Partial<Opportunity>> {
       if (!rawText || rawText.trim().length < 10) throw new Error("Content too short.");
 
-      // Truncate to avoid context window limits (Llama 3 supports large context, but safe limit is good)
       const textToAnalyze = rawText.substring(0, 25000); 
 
       const prompt = `
@@ -62,7 +57,6 @@ export class AiAgentService {
       `;
 
       try {
-          // EXCLUSIVE GROQ CALL - QUALITY MODEL
           const { text } = await groqCall(prompt, { 
               jsonMode: true, 
               model: GROQ_MODELS.QUALITY 
@@ -71,7 +65,6 @@ export class AiAgentService {
           const data = safeParseJSON<any>(text);
           if (!data) throw new Error("Could not parse AI response.");
 
-          // Data Cleaning
           let deadlineDate = data.deadline;
           const d = new Date(deadlineDate);
           if (!deadlineDate || isNaN(d.getTime())) {
@@ -134,9 +127,6 @@ export class AiAgentService {
       return mode === 'daily' ? indiaSources : [...indiaSources, ...globalSources];
   }
 
-  /**
-   * SEARCH ENGINE FAILOVER SYSTEM
-   */
   private async searchWeb(keyword: string, onLog: (msg: string) => void): Promise<string[]> {
       try {
           const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(keyword)}`;
@@ -149,10 +139,6 @@ export class AiAgentService {
       return [];
   }
 
-  /**
-   * Pre-screen content to save tokens on the large model.
-   * Uses Llama-3.1-8b-instant for speed.
-   */
   private async isRelevantContent(text: string): Promise<boolean> {
       if (text.length < 500) return false;
       const lower = text.toLowerCase();
@@ -168,7 +154,6 @@ export class AiAgentService {
           return false;
       }
       
-      // EXCLUSIVE GROQ CALL - FAST MODEL
       const prompt = `Does this text describe a grant, artist residency, festival submission, funding opportunity, competition, or call for proposals? Reply only YES or NO.\n\nText: ${text.substring(0, 1000)}...`;
       try {
           const { text: answer } = await groqCall(prompt, { 
@@ -177,13 +162,12 @@ export class AiAgentService {
           });
           return answer.trim().toUpperCase().includes("YES");
       } catch {
-          return true; // Fallback to true to be safe
+          return true; 
       }
   }
 
   /**
    * AUTO-PILOT MODE
-   * Supports 'daily' for urgent checks and 'deep' for exploration.
    */
   async performAutoScan(onLog: (msg: string) => void, options: ScanOptions = { mode: 'deep' }): Promise<Opportunity[]> {
       const foundOpportunities: Opportunity[] = [];
@@ -191,26 +175,23 @@ export class AiAgentService {
       const brain = KeywordBrain.get();
       
       const TARGET_COUNT = options.targetCount || 10;
-      // Deep mode scans significantly more pages to cover "www"
       const MAX_SCANS = options.mode === 'deep' ? 50 : 20; 
 
       onLog("🚀 Initializing Global Groq Agent...");
       onLog(`ℹ️ Mode: ${options.mode.toUpperCase()} SCAN`);
       
       // 1. Keyword Selection
-      // Mixed mode ensures international keywords are picked up in deep scans
       const keywordMode = 'mixed'; 
       const batchSize = options.mode === 'deep' ? 25 : 10;
       const keywords = brain.getBatch(batchSize, keywordMode);
       
-      onLog(`🎯 Targets (${keywords.length}): ${keywords.slice(0, 3).map(k => `"${k}"`).join(", ")} and ${keywords.length - 3} more...`);
+      onLog(`🎯 Targets (${keywords.length}): ${keywords.slice(0, 3).map(k => `"${k}"`).join(", ")}...`);
 
       // 2. Build Candidate List
       let candidateUrls: string[] = [];
 
-      // A. Search
       for (const keyword of keywords) {
-          onLog(`\n🔎 Scanning World Wide Web for: "${keyword}"...`);
+          onLog(`\n🔎 Scanning: "${keyword}"...`);
           const links = await this.searchWeb(keyword, onLog);
           if (links.length > 0) {
               const cleanLinks = links.filter(l => l.length > 25 && !l.includes('search?') && !l.includes('google'));
@@ -218,18 +199,14 @@ export class AiAgentService {
           }
       }
 
-      // B. Backup Sources
-      onLog(`\n🛡️ Scanning Global Opportunity Databases...`);
       const backups = this.getBackupLinks(options.mode);
       candidateUrls.push(...backups);
-      
-      // Deduplicate
       candidateUrls = [...new Set(candidateUrls)];
-      onLog(`\n📋 Queue: ${candidateUrls.length} unique URLs found.`);
+      onLog(`\n📋 Queue: ${candidateUrls.length} unique URLs.`);
 
       // 3. Execution Loop
       let scannedCount = 0;
-      onLog(`\n🕵️ Analyzing content (Model: ${GROQ_MODELS.FAST.replace('llama-3.1-', '')} for filter, ${GROQ_MODELS.QUALITY.replace('llama-3.3-', '')} for extraction)...`);
+      onLog(`\n🕵️ Analyzing content...`);
 
       for (const url of candidateUrls) {
           if (foundOpportunities.length >= TARGET_COUNT) {
@@ -237,31 +214,42 @@ export class AiAgentService {
               break;
           }
           if (scannedCount >= MAX_SCANS) {
-              onLog(`\n🛑 Scan Limit Reached (${MAX_SCANS} pages).`);
+              onLog(`\n🛑 Scan Limit Reached (${MAX_SCANS}).`);
               break;
           }
 
           if (processedUrls.has(url)) continue;
           processedUrls.add(url);
 
-          // onLog(`   Reading: ${url.replace('https://', '').substring(0, 40)}...`);
+          // --- DEDUPLICATION CHECK ---
+          const alreadyExists = await opportunityService.checkExists(null, url);
+          if (alreadyExists) {
+              onLog(`      Skipping (Already in DB): ${url.substring(0, 30)}...`);
+              continue; // Save API Quota
+          }
           
           try {
               const pageText = await webScraperService.fetchWithJina(url);
               
-              // FAST CHECK (Llama 3.1 8b)
+              // FAST CHECK
               const isRelevant = await this.isRelevantContent(pageText);
               if (!isRelevant) {
                   continue;
               }
 
-              // DEEP EXTRACTION (Llama 3.3 70b)
-              onLog(`      ⚡ Extraction in progress: ${url.substring(0, 50)}...`);
+              // DEEP EXTRACTION
+              onLog(`      ⚡ Analyzing: ${url.substring(0, 40)}...`);
               const opp = await this.parseOpportunityText(pageText, url);
               
               if (opp.title && opp.title !== "Untitled Opportunity" && opp.daysLeft! > 0) {
-                  foundOpportunities.push(opp as Opportunity);
-                  onLog(`      ✅ MATCH: "${opp.title}" (${opp.scope})`);
+                  // Double check title to be safe
+                  const titleExists = await opportunityService.checkExists(opp.title);
+                  if (titleExists) {
+                      onLog(`      ⚠️ Duplicate found via Title: "${opp.title}"`);
+                  } else {
+                      foundOpportunities.push(opp as Opportunity);
+                      onLog(`      ✅ NEW MATCH: "${opp.title}"`);
+                  }
               } 
               
               scannedCount++;
@@ -273,7 +261,7 @@ export class AiAgentService {
           await new Promise(r => setTimeout(r, 1000)); 
       }
 
-      onLog(`\n🏁 Scan Complete. Found ${foundOpportunities.length} opportunities.`);
+      onLog(`\n🏁 Scan Complete. Found ${foundOpportunities.length} new opportunities.`);
       return foundOpportunities;
   }
 }

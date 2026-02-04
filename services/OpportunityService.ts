@@ -1,3 +1,4 @@
+
 import { supabase } from './supabase';
 import { Opportunity } from '../types';
 import { OPPORTUNITIES as MOCK_DATA } from '../constants';
@@ -14,6 +15,8 @@ class OpportunityService {
       .order('deadline_date', { ascending: true });
 
     if (error || !data || data.length === 0) {
+      // Fallback to mock data only if DB is empty or fails, mostly for demo purposes
+      // In a real app, you might prefer returning [] on error after logging
       return MOCK_DATA;
     }
     return data.map(this.mapFromDb);
@@ -35,26 +38,33 @@ class OpportunityService {
 
   // --- MANUAL CURATION API ---
 
-  async checkExists(title: string, sourceUrl?: string): Promise<boolean> {
-      // Simple duplicate check logic
-      if (!title) return false;
-      
-      let query = supabase.from('opportunities').select('id', { count: 'exact', head: true });
-      
-      // Check by title match (fuzzy or exact)
-      // For simplicity, we use eq on title. In production, use ilike or pg_trgm
-      const { count } = await query.eq('title', title);
-      
-      if (count && count > 0) return true;
+  /**
+   * Checks if an opportunity exists by URL (exact) or Title (fuzzy/case-insensitive).
+   * Used by AI Agent to prevent duplicate API costs.
+   */
+  async checkExists(title: string | null, sourceUrl?: string): Promise<boolean> {
+      try {
+          // 1. Check URL first (Fastest & Most Accurate)
+          if (sourceUrl) {
+              const { count } = await supabase
+                .from('opportunities')
+                .select('id', { count: 'exact', head: true })
+                .eq('source_url', sourceUrl);
+              
+              if (count !== null && count > 0) return true;
+          }
 
-      // If URL is provided, check that too
-      if (sourceUrl) {
-          const { count: urlCount } = await supabase
-            .from('opportunities')
-            .select('id', { count: 'exact', head: true })
-            .eq('source_url', sourceUrl);
-          
-          if (urlCount && urlCount > 0) return true;
+          // 2. Check Title if provided (Fuzzy)
+          if (title && title.length > 5) {
+              const { count } = await supabase
+                .from('opportunities')
+                .select('id', { count: 'exact', head: true })
+                .ilike('title', title); // Case-insensitive match
+              
+              if (count !== null && count > 0) return true;
+          }
+      } catch (e) {
+          console.warn("Check exists failed, assuming false to proceed", e);
       }
 
       return false;
@@ -73,24 +83,28 @@ class OpportunityService {
               row.deadline_date = null;
           }
 
-          // Remove undefined keys entirely
-          Object.keys(row).forEach(key => (row as any)[key] === undefined && delete (row as any)[key]);
+          // Remove undefined keys entirely to prevent JSON serialization issues
+          // This often causes "TypeError: Load failed" in fetch if body is malformed
+          const cleanRow = Object.fromEntries(
+              Object.entries(row).filter(([_, v]) => v !== undefined && v !== null)
+          );
 
+          // Insert
           const { data, error } = await supabase
               .from('opportunities')
-              .insert(row)
+              .insert(cleanRow)
               .select()
               .single();
 
           if (error) {
-              console.error("DB Insert Error", error);
+              console.error("DB Insert Error:", error);
               return { success: false, error: error.message };
           }
 
           return { success: true, id: data.id };
       } catch (err: any) {
-          console.error("OpportunityService Unexpected Error", err);
-          return { success: false, error: err.message || "Unknown error occurred" };
+          console.error("OpportunityService Unexpected Error:", err);
+          return { success: false, error: err.message || "Network/Client Error" };
       }
   }
 
