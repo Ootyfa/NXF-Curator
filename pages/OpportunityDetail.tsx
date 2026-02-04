@@ -99,6 +99,11 @@ const OpportunityDetail: React.FC = () => {
       setEditMode(false);
       showToast('Changes saved successfully!');
   };
+  
+  const handleArrayChange = (field: 'eligibility' | 'requirements', value: string) => {
+    const items = value.split('\n').filter(s => s.trim() !== '');
+    setFormData({ ...formData, [field]: items });
+  };
 
   const ensureAbsoluteUrl = (url: string) => {
     if (!url) return '';
@@ -158,7 +163,7 @@ const OpportunityDetail: React.FC = () => {
         {editMode && field ? (
              <input 
                 className="w-full border border-gray-300 rounded p-1 text-sm"
-                value={formData[field] as string}
+                value={formData[field] as string || ''}
                 onChange={e => setFormData({...formData, [field]: e.target.value})}
              />
         ) : (
@@ -261,11 +266,22 @@ const OpportunityDetail: React.FC = () => {
               </div>
               <div>
                   <span className="text-xs text-text-light block mb-1">Entry Fee</span>
-                  <span className="font-semibold text-secondary">{opportunity.applicationFee || 'N/A'}</span>
+                   {editMode ? (
+                      <input className="border rounded p-1 w-full text-sm" value={formData.applicationFee} onChange={e => setFormData({...formData, applicationFee: e.target.value})} />
+                  ) : (
+                      <span className="font-semibold text-secondary">{opportunity.applicationFee || 'N/A'}</span>
+                  )}
               </div>
               <div>
                   <span className="text-xs text-text-light block mb-1">Scope</span>
-                  <span className="font-semibold text-secondary">{opportunity.scope || 'National'}</span>
+                   {editMode ? (
+                      <select className="border rounded p-1 w-full text-sm" value={formData.scope} onChange={e => setFormData({...formData, scope: e.target.value as any})}>
+                          <option value="National">National</option>
+                          <option value="International">International</option>
+                      </select>
+                  ) : (
+                      <span className="font-semibold text-secondary">{opportunity.scope || 'National'}</span>
+                  )}
               </div>
           </div>
         </div>
@@ -295,18 +311,26 @@ const OpportunityDetail: React.FC = () => {
                 <div>
                      <div className="mb-6">
                         <span className="block text-xs font-semibold text-text uppercase tracking-wide mb-3">Eligibility</span>
-                        <ul className="space-y-2">
-                            {opportunity.eligibility.map((item, idx) => (
-                                <li key={idx} className="flex items-start text-sm text-secondary">
-                                    <Check size={16} className="text-primary mt-0.5 mr-2 flex-shrink-0" />
-                                    {item}
-                                </li>
-                            ))}
-                        </ul>
+                        {editMode ? (
+                            <textarea 
+                                className="w-full border border-gray-300 rounded p-2 text-sm"
+                                rows={6}
+                                value={formData.eligibility?.join('\n')}
+                                onChange={e => handleArrayChange('eligibility', e.target.value)}
+                                placeholder="One item per line"
+                            />
+                        ) : (
+                            <ul className="space-y-2">
+                                {opportunity.eligibility.map((item, idx) => (
+                                    <li key={idx} className="flex items-start text-sm text-secondary">
+                                        <Check size={16} className="text-primary mt-0.5 mr-2 flex-shrink-0" />
+                                        {item}
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
                      </div>
-                     {opportunity.submissionPlatform && (
-                         <DetailRow label="Submission Platform" value={opportunity.submissionPlatform} />
-                     )}
+                     <DetailRow label="Submission Platform" value={opportunity.submissionPlatform} field="submissionPlatform" />
                 </div>
             </div>
 
@@ -324,9 +348,18 @@ const OpportunityDetail: React.FC = () => {
                             Copy Caption
                         </button>
                     </div>
-                    <p className="text-sm text-gray-700 italic border-l-2 border-purple-300 pl-3">
-                        {opportunity.instagramCaption}
-                    </p>
+                    {editMode ? (
+                        <textarea 
+                            className="w-full border border-purple-200 rounded p-2 text-sm"
+                            rows={3}
+                            value={formData.instagramCaption}
+                            onChange={e => setFormData({...formData, instagramCaption: e.target.value})}
+                        />
+                    ) : (
+                        <p className="text-sm text-gray-700 italic border-l-2 border-purple-300 pl-3">
+                            {opportunity.instagramCaption}
+                        </p>
+                    )}
                 </div>
             )}
         </div>

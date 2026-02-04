@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Lock, FileText, ArrowRight, Save, Database, Trash2, CheckCircle, Clipboard, Bot, Terminal, Play, Pause, Calendar, RefreshCw, Globe, PenTool, Hash, AlertTriangle } from 'lucide-react';
+import { Lock, FileText, ArrowRight, Save, Database, Trash2, CheckCircle, Clipboard, Bot, Terminal, Play, Pause, Calendar, RefreshCw, Globe, PenTool, Hash, AlertTriangle, Mail, Phone } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../services/supabase';
 import { aiAgentService } from '../services/AiAgentService';
@@ -187,6 +187,23 @@ const AgentScanner: React.FC = () => {
       if (!data) return;
       setData({ ...data, [field]: value });
   };
+  
+  const handleArrayChange = (field: 'eligibility' | 'requirements', value: string) => {
+      if (!data) return;
+      const array = value.split('\n').filter(s => s.trim() !== '');
+      setData({ ...data, [field]: array });
+  };
+  
+  const handleContactChange = (field: 'email' | 'website' | 'phone', value: string) => {
+      if (!data) return;
+      setData({ 
+          ...data, 
+          contact: { 
+              ...(data.contact || { email: '', website: '', phone: '' }), 
+              [field]: value 
+          } 
+      });
+  };
 
   // --- LOCK SCREEN ---
   if (!isAuthenticated) {
@@ -319,14 +336,80 @@ const AgentScanner: React.FC = () => {
                                         </select>
                                     </div>
                                 </div>
-                                <div>
-                                    <label className="label">Website URL</label>
-                                    <input type="text" className="input" value={data.contact?.website} onChange={e => setData({...data, contact: {...data.contact!, website: e.target.value}})} />
+                                <div className="grid grid-cols-2 gap-4">
+                                     <div>
+                                        <label className="label">Scope</label>
+                                        <select className="input" value={data.scope || 'National'} onChange={e => handleFieldChange('scope', e.target.value)}>
+                                            <option value="National">National</option>
+                                            <option value="International">International</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="label">Category</label>
+                                        <input type="text" className="input" value={data.category || ''} onChange={e => handleFieldChange('category', e.target.value)} placeholder="e.g. Documentary Film" />
+                                    </div>
                                 </div>
+                                <div className="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label className="label">Application Fee</label>
+                                        <input type="text" className="input" value={data.applicationFee || ''} onChange={e => handleFieldChange('applicationFee', e.target.value)} placeholder="e.g. $25 or Free" />
+                                    </div>
+                                     <div>
+                                        <label className="label">Event Dates</label>
+                                        <input type="text" className="input" value={data.eventDates || ''} onChange={e => handleFieldChange('eventDates', e.target.value)} placeholder="e.g. Aug 2025" />
+                                    </div>
+                                </div>
+                                <div>
+                                    <label className="label">Submission Platform</label>
+                                    <input type="text" className="input" value={data.submissionPlatform || ''} onChange={e => handleFieldChange('submissionPlatform', e.target.value)} placeholder="e.g. FilmFreeway, Direct" />
+                                </div>
+                                
+                                {/* CONTACT SECTION */}
+                                <div className="bg-gray-50 p-3 rounded border border-gray-100">
+                                    <label className="label mb-2">Contact Info</label>
+                                    <div className="space-y-2">
+                                        <div className="flex items-center gap-2">
+                                            <Globe size={16} className="text-gray-400" />
+                                            <input type="text" className="input" value={data.contact?.website || ''} onChange={e => handleContactChange('website', e.target.value)} placeholder="Website URL" />
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <Mail size={16} className="text-gray-400" />
+                                            <input type="text" className="input" value={data.contact?.email || ''} onChange={e => handleContactChange('email', e.target.value)} placeholder="Email Address" />
+                                        </div>
+                                        <div className="flex items-center gap-2">
+                                            <Phone size={16} className="text-gray-400" />
+                                            <input type="text" className="input" value={data.contact?.phone || ''} onChange={e => handleContactChange('phone', e.target.value)} placeholder="Phone Number" />
+                                        </div>
+                                    </div>
+                                </div>
+
                                 <div>
                                     <label className="label">Description</label>
                                     <textarea className="input" rows={4} value={data.description} onChange={e => handleFieldChange('description', e.target.value)} />
                                 </div>
+
+                                <div>
+                                    <label className="label">Eligibility (One per line)</label>
+                                    <textarea 
+                                        className="input" 
+                                        rows={4} 
+                                        value={data.eligibility?.join('\n') || ''} 
+                                        onChange={e => handleArrayChange('eligibility', e.target.value)} 
+                                        placeholder="e.g. Indian Citizens Only&#10;Short Films&#10;Under 30 mins"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="label">Requirements (One per line)</label>
+                                    <textarea 
+                                        className="input" 
+                                        rows={4} 
+                                        value={data.requirements?.join('\n') || ''} 
+                                        onChange={e => handleArrayChange('requirements', e.target.value)} 
+                                        placeholder="e.g. Synopsis&#10;Director Bio&#10;Preview Link"
+                                    />
+                                </div>
+
                                 <div className="p-3 bg-purple-50 rounded border border-purple-100">
                                     <div className="flex items-center text-purple-700 mb-2">
                                         <Hash size={14} className="mr-1" />
