@@ -147,13 +147,20 @@ const AgentScanner: React.FC = () => {
       }
   };
 
-  // REJECTION HANDLER
-  const handleRejectItem = (index: number) => {
+  // REJECTION HANDLER (Smart AI Feedback)
+  const handleRejectItem = async (index: number) => {
+      const itemToReject = foundItems[index];
+      
+      // Update UI immediately
       const newList = [...foundItems];
       newList.splice(index, 1);
       setFoundItems(newList);
-      // Optional: Add log or visual feedback
+      
       addLog(`❌ Item rejected by admin.`);
+      addLog(`🧠 AI is learning from rejection: "${itemToReject.title}"...`);
+
+      // Teach the AI
+      await aiAgentService.learnFromRejection(itemToReject);
   };
 
   // REVIEW HANDLER (Populates Form)
@@ -427,7 +434,7 @@ const AgentScanner: React.FC = () => {
                                     <button
                                         onClick={() => handleRejectItem(idx)}
                                         className="px-3 py-2 bg-red-50 text-red-600 border border-red-100 rounded hover:bg-red-100"
-                                        title="Reject"
+                                        title="Reject & Teach AI"
                                     >
                                         <Trash2 size={16} />
                                     </button>

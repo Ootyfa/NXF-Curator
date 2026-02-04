@@ -15,6 +15,37 @@ interface ScanOptions {
 // ============================================================
 export class AiAgentService {
   
+  // In-memory list of concepts the admin has explicitly rejected
+  private negativeConstraints: string[] = [];
+
+  /**
+   * LEARNING MECHANISM:
+   * Takes a rejected opportunity and adds its core concept to the negative constraints.
+   * This influences the 'isRelevantContent' filter immediately.
+   */
+  async learnFromRejection(opp: Partial<Opportunity>) {
+      if (!opp.title) return;
+      
+      // 1. Persist as 'rejected' in DB so we never fetch this exact URL/Title again
+      await opportunityService.createOpportunity({
+          ...opp,
+          status: 'rejected',
+          aiReasoning: 'Rejected by Admin via Agent Scanner'
+      });
+
+      // 2. Add to in-memory negative prompt for the current session
+      // We keep it short to not overflow context
+      const constraint = `"${opp.title}" (${opp.type})`;
+      this.negativeConstraints.push(constraint);
+      
+      // Keep only last 10 rejections to maintain speed
+      if (this.negativeConstraints.length > 10) {
+          this.negativeConstraints.shift();
+      }
+
+      console.log(`🧠 AI Learned Negative Pattern: Avoid items like ${constraint}`);
+  }
+
   /**
    * SPECIALIZED: Daily 6 AM Deep Scan
    * Targets international and national opportunities.
@@ -159,7 +190,13 @@ export class AiAgentService {
           return false;
       }
       
-      const prompt = `Does this text describe a grant, artist residency, festival submission, funding opportunity, competition, or call for proposals? Reply only YES or NO.\n\nText: ${text.substring(0, 1000)}...`;
+      // Inject Admin Constraints into the Prompt
+      const negativeInstruction = this.negativeConstraints.length > 0 
+        ? `\n\nIMPORTANT: The user has explicitly REJECTED items similar to these. Return NO if the text matches these concepts: ${this.negativeConstraints.join(", ")}.`
+        : "";
+
+      const prompt = `Does this text describe a grant, artist residency, festival submission, funding opportunity, competition, or call for proposals? Reply only YES or NO.${negativeInstruction}\n\nText: ${text.substring(0, 1000)}...`;
+      
       try {
           const { text: answer } = await groqCall(prompt, { 
               model: GROQ_MODELS.FAST, 
@@ -185,6 +222,10 @@ export class AiAgentService {
       onLog("🚀 Initializing Global Groq Agent...");
       onLog(`ℹ️ Mode: ${options.mode.toUpperCase()} SCAN`);
       
+      if (this.negativeConstraints.length > 0) {
+          onLog(`🧠 Active Filters: Avoiding ${this.negativeConstraints.length} rejected patterns.`);
+      }
+
       // 1. Keyword Selection
       const keywordMode = 'mixed'; 
       const batchSize = options.mode === 'deep' ? 25 : 10;
