@@ -1,12 +1,17 @@
-
 // ============================================================
 // GroqClient.ts
 //
 // SINGLE source of truth for Groq API calls.
-// Uses Llama-3.3-70b-versatile for high quality parsing.
+// Now supports model selection for performance vs quality.
+// Includes Rate Limiting and Backoff strategies.
 // ============================================================
 
 const BASE = "https://api.groq.com/openai/v1/chat/completions";
+
+export const GROQ_MODELS = {
+  FAST: "llama-3.1-8b-instant",     // Good for simple summaries, chat
+  QUALITY: "llama-3.3-70b-versatile" // Best for complex extraction, JSON
+};
 
 // ------------------------------------------------------------
 // KEY MANAGER (Singleton)
@@ -35,7 +40,6 @@ class KeyManager {
 
   pick(): string | null {
     if (this.keys.length === 0) return null;
-    // Simple rotation or random pick
     return this.keys[Math.floor(Math.random() * this.keys.length)];
   }
 
@@ -67,58 +71,107 @@ export function safeParseJSON<T>(text: string): T | null {
   return null;
 }
 
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 // ------------------------------------------------------------
 // MAIN CALL
 // ------------------------------------------------------------
+export interface GroqOptions {
+  jsonMode?: boolean;
+  log?: (msg: string) => void;
+  model?: string; // Override default model
+  temperature?: number;
+  topP?: number;
+}
+
 export async function groqCall(
   prompt: string,
-  options: { jsonMode?: boolean; log?: (msg: string) => void } = {}
+  options: GroqOptions = {}
 ): Promise<{ text: string; usedModel: string }> {
   const km = KeyManager.get();
   if (km.count() === 0) throw new Error("No Groq API keys found. Please check .env file.");
 
-  const log = options.log || (() => {});
-  const key = km.pick();
-  
-  if (!key) throw new Error("Failed to retrieve API Key");
+  const model = options.model || GROQ_MODELS.QUALITY;
 
-  // Model Selection: Llama 3.3 is excellent for instruction following
-  const model = "llama-3.3-70b-versatile";
+  // Parameter Tuning
+  // For QUALITY/Extraction tasks, we want high determinism (low temp)
+  const defaultTemp = model === GROQ_MODELS.QUALITY ? 0 : 0.6;
+  const temperature = options.temperature ?? defaultTemp;
+  const topP = options.topP ?? 0.9;
 
-  try {
-    const body: any = {
-      model: model,
-      messages: [
-          { role: "system", content: "You are a helpful data extraction assistant. You output strict JSON when asked." },
-          { role: "user", content: prompt }
-      ],
-      temperature: 0.1, // Low temp for deterministic data extraction
-    };
+  let attempt = 0;
+  const maxRetries = 3;
+  let lastError: any;
 
-    if (options.jsonMode) {
-        body.response_format = { type: "json_object" };
+  while (attempt < maxRetries) {
+    const key = km.pick();
+    if (!key) throw new Error("Failed to retrieve API Key");
+
+    try {
+      const body: any = {
+        model: model,
+        messages: [
+            { role: "system", content: "You are a helpful data extraction assistant. You output strict JSON when asked." },
+            { role: "user", content: prompt }
+        ],
+        temperature: temperature,
+        top_p: topP
+      };
+
+      if (options.jsonMode) {
+          body.response_format = { type: "json_object" };
+      }
+
+      const res = await fetch(BASE, {
+        method: "POST",
+        headers: { 
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${key}`
+        },
+        body: JSON.stringify(body),
+      });
+
+      // Handle Rate Limiting (429)
+      if (res.status === 429) {
+          const retryAfterHeader = res.headers.get("Retry-After");
+          const waitTime = retryAfterHeader 
+              ? parseInt(retryAfterHeader, 10) * 1000 
+              : 2000 * Math.pow(2, attempt); // Exponential backoff: 2s, 4s, 8s
+          
+          if (options.log) options.log(`Rate limit hit. Retrying in ${waitTime}ms...`);
+          console.warn(`[Groq] Rate Limit 429. Retrying in ${waitTime}ms...`);
+          
+          await delay(waitTime);
+          attempt++;
+          continue;
+      }
+
+      if (!res.ok) {
+          const txt = await res.text();
+          throw new Error(`Groq API Error (${res.status}): ${txt}`);
+      }
+
+      const json = await res.json();
+      const content = json.choices?.[0]?.message?.content || "";
+
+      return { text: content, usedModel: model };
+
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`[Groq] Attempt ${attempt + 1} failed: ${err.message}`);
+      
+      // Retry on network errors or 5xx server errors
+      // Don't retry on 4xx errors (except 429 which is handled above)
+      if (err.message.includes("401") || err.message.includes("400")) {
+         // Break immediately for auth errors or bad requests
+         throw err; 
+      }
+
+      const backoff = 1000 * Math.pow(2, attempt);
+      await delay(backoff);
+      attempt++;
     }
-
-    const res = await fetch(BASE, {
-      method: "POST",
-      headers: { 
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${key}`
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(`Groq API Error (${res.status}): ${txt}`);
-    }
-
-    const json = await res.json();
-    const content = json.choices?.[0]?.message?.content || "";
-
-    return { text: content, usedModel: model };
-
-  } catch (err: any) {
-    throw new Error(`Groq Call Failed: ${err.message}`);
   }
+
+  throw new Error(`Groq Call Failed after ${maxRetries} attempts. Last error: ${lastError?.message}`);
 }

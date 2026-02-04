@@ -1,16 +1,35 @@
 
 export const webScraperService = {
-  // List of CORS proxies to try in order. 
-  // 'allorigins' is usually the most reliable for text content.
+  // Proxies for raw HTML fetching (Search Engine Results)
+  // Ordered by reliability and permissive CORS headers
   proxies: [
     (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
     (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
     (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    // Fallback: This one sometimes works for simple text
     (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`,
   ],
 
   /**
-   * Fetches the raw text of a URL (HTML).
+   * JINA AI READER (Primary Content Fetcher)
+   * Converts any URL to LLM-friendly Markdown.
+   */
+  async fetchWithJina(url: string): Promise<string> {
+      try {
+          // Jina Reader is a specialized service for LLMs
+          const response = await fetch(`https://r.jina.ai/${url}`, {
+              headers: { 'X-No-Cache': 'true' }
+          });
+          if (!response.ok) throw new Error("Jina Reader API error");
+          return await response.text();
+      } catch (e) {
+          // Fallback to raw proxy fetch if Jina fails
+          return this.fetchUrlContent(url);
+      }
+  },
+
+  /**
+   * Fetches raw HTML via proxies (for Search Results)
    */
   async fetchRaw(url: string): Promise<string> {
       let validUrl = url;
@@ -21,11 +40,8 @@ export const webScraperService = {
         try {
           const proxyUrl = proxyGen(validUrl);
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 20000); // 20s timeout
+          const timeoutId = setTimeout(() => controller.abort(), 12000); // 12s timeout
 
-          // NOTE: We do NOT send custom headers like User-Agent here because 
-          // 1. Browsers override them anyway.
-          // 2. It triggers OPTIONS preflight which often fails on free proxies.
           const response = await fetch(proxyUrl, { 
               signal: controller.signal 
           });
@@ -34,19 +50,19 @@ export const webScraperService = {
           if (!response.ok) continue;
 
           const text = await response.text();
-          if (!text || text.length < 50) continue;
+          // Validate: Search engines sometimes return empty 200 OK responses on bot detection
+          if (!text || text.length < 100) continue; 
 
           return text;
         } catch (error) {
-           // console.warn(`Proxy ${proxyGen(validUrl)} failed.`);
            // Continue to next proxy
         }
       }
-      throw new Error(`Failed to fetch content for ${url}`);
+      throw new Error(`All proxies failed for ${url}`);
   },
 
   /**
-   * Fetches and cleans content for AI analysis.
+   * Fallback Cleaner (used if Jina fails)
    */
   async fetchUrlContent(url: string): Promise<string> {
     try {
@@ -62,27 +78,21 @@ export const webScraperService = {
     text = text.replace(/<script\b[^>]*>([\s\S]*?)<\/script>/gm, " ");
     text = text.replace(/<style\b[^>]*>([\s\S]*?)<\/style>/gm, " ");
     text = text.replace(/<!--[\s\S]*?-->/g, " ");
-    text = text.replace(/<[^>]+>/g, " "); // Strip tags
-    text = text.replace(/\s+/g, " ").trim(); // Collapse whitespace
+    text = text.replace(/<[^>]+>/g, " "); 
+    text = text.replace(/\s+/g, " ").trim();
     return text;
   },
 
-  /**
-   * Robust Link Extractor
-   * Extracts all unique HTTP/HTTPS links from the HTML.
-   */
   extractLinks(html: string, baseUrl: string): string[] {
       const links = new Set<string>();
-      
       // Generic regex to capture ALL href attributes
-      // Matches href="http..." or href='/...'
       const regex = /href=["']([^"']+)["']/g;
       let match;
       
       while ((match = regex.exec(html)) !== null) {
           let link = match[1];
 
-          // 1. Resolve Relative URLs
+          // Handle relative links
           if (link.startsWith('/')) {
               try {
                   const base = new URL(baseUrl);
@@ -90,29 +100,24 @@ export const webScraperService = {
               } catch (e) {}
           }
 
-          // 2. Filter Junk & Search Engine artifacts
+          // Strict filter to remove garbage and ads
           if (
               link.startsWith('http') && 
-              !link.includes('duckduckgo.com') &&
-              !link.includes('google.com') &&
-              !link.includes('bing.com') &&
-              !link.includes('yahoo.com') &&
-              !link.includes('yandex.com') &&
-              !link.includes('facebook.com') &&
-              !link.includes('twitter.com') &&
-              !link.includes('linkedin.com') &&
-              !link.includes('instagram.com') &&
-              !link.includes('youtube.com') &&
-              !link.includes('microsoft.com') &&
-              !link.includes('w3.org') &&
-              !link.includes('cloudflare.com') &&
+              !link.includes('google.') &&
+              !link.includes('facebook.') &&
+              !link.includes('twitter.') &&
+              !link.includes('instagram.') &&
+              !link.includes('youtube.') &&
+              !link.includes('linkedin.') &&
+              !link.includes('mojeek.') &&
+              !link.includes('duckduckgo.') &&
+              !link.includes('microsoft.') &&
+              !link.includes('yahoo.') &&
               !link.includes('.css') &&
               !link.includes('.js') &&
               !link.includes('.png') &&
               !link.includes('.jpg') &&
-              !link.includes('.ico') &&
-              !link.includes('ad_') &&
-              !link.includes('click?')
+              !link.includes('javascript:')
           ) {
               links.add(link);
           }

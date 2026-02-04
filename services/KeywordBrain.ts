@@ -39,6 +39,9 @@ export class KeywordBrain {
     "Tribeca All Access India",
     "Netflix India creative equity fund",
     "Amazon Prime Video India pitch",
+    "VR filmmaking grant India",
+    "immersive storytelling funding India",
+    "screenplay contest India cash prize",
     
     // --- VISUAL ARTS ---
     "artist residency India 2025 open call",
@@ -66,6 +69,13 @@ export class KeywordBrain {
     "photography grant India 2025",
     "Alkazi Foundation photography grant",
     "India Habitat Centre photography fellowship",
+    "art curator grant India",
+    "graphic novel grant India",
+    "street art festival open call India",
+    "ceramic residency India",
+    "printmaking workshop funding India",
+    "call for artists India 2025",
+    "emerging artist award India",
 
     // --- PERFORMING ARTS (DANCE/THEATRE/MUSIC) ---
     "theatre production grant India",
@@ -88,6 +98,13 @@ export class KeywordBrain {
     "Alliance Francaise India cultural grant",
     "Pro Helvetia India residency",
     "performing arts tour grant",
+    "contemporary dance funding India",
+    "theatre residency open call India",
+    "music residency India application",
+    "folk music research grant India",
+    "puppetry arts grant India",
+    "choreography grant India",
+    "indie music festival submission India",
 
     // --- LITERATURE & WRITING ---
     "creative writing residency India",
@@ -101,6 +118,10 @@ export class KeywordBrain {
     "playwriting competition India",
     "publishing grant for indian authors",
     "Jaipur Literature Festival speaking pitch",
+    "debut novel prize India",
+    "poetry residency India",
+    "literary translation funding India",
+    "writer in residence India",
     
     // --- GENERAL & GOVERNMENT ---
     "Ministry of Culture India fellowship scheme",
@@ -123,7 +144,13 @@ export class KeywordBrain {
     "NFT art fund India",
     "arts management fellowship India",
     "museum curation course scholarship",
-    "heritage preservation grant India"
+    "heritage preservation grant India",
+    "cultural entrepreneurship grant India",
+    "museum fellowship India",
+    "archival research grant India",
+    "craft revival grant India",
+    "Zonal Cultural Centre schemes India",
+    "corporate CSR arts grants India"
   ];
 
   static get(): KeywordBrain {
