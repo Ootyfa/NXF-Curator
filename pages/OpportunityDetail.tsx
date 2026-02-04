@@ -88,8 +88,14 @@ const OpportunityDetail: React.FC = () => {
 
   const handleAdminSave = async () => {
       if(!id || !opportunity) return;
-      await opportunityService.organizerUpdate(id, formData);
-      setOpportunity({...opportunity, ...formData} as Opportunity);
+      
+      const updatedData = {
+          ...formData,
+          lastEditedBy: 'admin' as const
+      };
+      
+      await opportunityService.organizerUpdate(id, updatedData);
+      setOpportunity({...opportunity, ...updatedData} as Opportunity);
       setEditMode(false);
       showToast('Changes saved successfully!');
   };
@@ -205,6 +211,11 @@ const OpportunityDetail: React.FC = () => {
                     <span className="bg-blue-50 text-blue-700 text-[10px] font-bold px-2 py-0.5 rounded-full border border-blue-100 flex items-center">
                         <ShieldCheck size={10} className="mr-1" /> VERIFIED
                     </span>
+                 )}
+                 {opportunity.lastEditedBy === 'admin' && (
+                     <span className="bg-gray-100 text-gray-600 text-[10px] font-bold px-2 py-0.5 rounded-full border border-gray-200 flex items-center">
+                         <ShieldCheck size={10} className="mr-1" /> ADMIN EDITED
+                     </span>
                  )}
              </div>
              

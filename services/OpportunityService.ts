@@ -124,6 +124,7 @@ class OpportunityService {
       instagramCaption: aiMeta.instagramCaption, // Map from metadata
       status: row.status || 'draft',
       userFeedback: row.user_feedback,
+      lastEditedBy: row.last_edited_by, // Mapped
     };
   }
 
@@ -157,6 +158,7 @@ class OpportunityService {
       ai_reasoning: opp.aiReasoning,
       ai_metadata: combinedMetadata,
       status: opp.status,
+      last_edited_by: opp.lastEditedBy, // Mapped
     };
   }
   

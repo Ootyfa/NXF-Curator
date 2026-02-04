@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect, useRef } from 'react';
-import { Lock, FileText, ArrowRight, Save, Database, Trash2, CheckCircle, Clipboard, Bot, Terminal, Play, Pause, Calendar, RefreshCw, Globe, PenTool, Hash } from 'lucide-react';
+import { Lock, FileText, ArrowRight, Save, Database, Trash2, CheckCircle, Clipboard, Bot, Terminal, Play, Pause, Calendar, RefreshCw, Globe, PenTool, Hash, AlertTriangle } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { supabase } from '../services/supabase';
 import { aiAgentService } from '../services/AiAgentService';
@@ -107,7 +107,14 @@ const AgentScanner: React.FC = () => {
   const handleManualSave = async () => {
       if (!data) return;
       setSaveStatus('saving');
-      const res = await opportunityService.createOpportunity(data);
+      
+      // Mark as edited by admin since they reviewed/edited it in the form
+      const payload = {
+          ...data,
+          lastEditedBy: 'admin' as const
+      };
+
+      const res = await opportunityService.createOpportunity(payload);
       if (res.success) {
           setSaveStatus('success');
           setTimeout(() => {
@@ -151,13 +158,13 @@ const AgentScanner: React.FC = () => {
   const handleRejectItem = async (index: number) => {
       const itemToReject = foundItems[index];
       
-      // Update UI immediately
+      // Update UI to show rejection visually instead of removing immediately
       const newList = [...foundItems];
-      newList.splice(index, 1);
+      newList[index] = { ...itemToReject, status: 'rejected' };
       setFoundItems(newList);
       
-      addLog(`❌ Item rejected by admin.`);
-      addLog(`🧠 AI is learning from rejection: "${itemToReject.title}"...`);
+      addLog(`❌ Item "${itemToReject.title}" rejected by admin.`);
+      addLog(`🧠 AI is learning from rejection...`);
 
       // Teach the AI
       await aiAgentService.learnFromRejection(itemToReject);
@@ -414,42 +421,53 @@ const AgentScanner: React.FC = () => {
                             <p>No new items found yet.</p>
                         </div>
                     ) : (
-                        foundItems.map((opp, idx) => (
-                            <div key={idx} className="bg-white p-4 rounded-lg border border-gray-200 shadow-sm transition-all hover:shadow-md">
-                                <h3 className="font-bold text-gray-800 text-lg mb-1">{opp.title}</h3>
-                                <p className="text-sm text-gray-600 mb-2">{opp.organizer}</p>
-                                <div className="flex flex-wrap gap-2 text-xs mb-3">
-                                    <span className="bg-blue-50 text-blue-700 px-2 py-1 rounded">Deadline: {opp.deadline}</span>
-                                    <span className="bg-yellow-50 text-yellow-700 px-2 py-1 rounded">{opp.type}</span>
-                                    {opp.scope === 'International' && <span className="bg-purple-50 text-purple-700 px-2 py-1 rounded flex items-center"><Globe size={10} className="mr-1"/> International</span>}
+                        foundItems.map((opp, idx) => {
+                            const isRejected = opp.status === 'rejected';
+                            return (
+                                <div key={idx} className={`p-4 rounded-lg border shadow-sm transition-all hover:shadow-md ${isRejected ? 'bg-gray-100 border-gray-200 opacity-60' : 'bg-white border-gray-200'}`}>
+                                    <div className="flex justify-between items-start">
+                                        <h3 className={`font-bold text-lg mb-1 ${isRejected ? 'text-gray-500 line-through' : 'text-gray-800'}`}>{opp.title}</h3>
+                                        {isRejected && <span className="text-xs font-bold text-red-500 bg-red-50 px-2 py-0.5 rounded border border-red-100 uppercase">Rejected</span>}
+                                    </div>
+                                    <p className="text-sm text-gray-600 mb-2">{opp.organizer}</p>
+                                    
+                                    {!isRejected && (
+                                        <>
+                                            <div className="flex flex-wrap gap-2 text-xs mb-3">
+                                                <span className="bg-blue-50 text-blue-700 px-2 py-1 rounded">Deadline: {opp.deadline}</span>
+                                                <span className="bg-yellow-50 text-yellow-700 px-2 py-1 rounded">{opp.type}</span>
+                                                {opp.scope === 'International' && <span className="bg-purple-50 text-purple-700 px-2 py-1 rounded flex items-center"><Globe size={10} className="mr-1"/> International</span>}
+                                            </div>
+                                            <p className="text-sm text-gray-500 line-clamp-2 mb-3">{opp.description}</p>
+                                            <div className="flex gap-2 pt-2 border-t border-gray-100">
+                                                <button 
+                                                    onClick={() => handleReviewItem(opp, idx)}
+                                                    className="flex-1 flex items-center justify-center bg-primary text-white py-2 rounded text-sm font-medium hover:bg-accent-hover transition-colors"
+                                                >
+                                                    <PenTool size={14} className="mr-2" /> Review & Edit
+                                                </button>
+                                                <button
+                                                    onClick={() => handleRejectItem(idx)}
+                                                    className="px-3 py-2 bg-red-50 text-red-600 border border-red-100 rounded hover:bg-red-100 transition-colors"
+                                                    title="Reject & Teach AI"
+                                                >
+                                                    <Trash2 size={16} />
+                                                </button>
+                                                <a 
+                                                    href={opp.sourceUrl} 
+                                                    target="_blank" 
+                                                    rel="noreferrer"
+                                                    className="px-3 py-2 border border-gray-300 rounded text-gray-600 hover:bg-gray-50"
+                                                    title="Check Source"
+                                                >
+                                                    <Globe size={16} />
+                                                </a>
+                                            </div>
+                                        </>
+                                    )}
                                 </div>
-                                <p className="text-sm text-gray-500 line-clamp-2 mb-3">{opp.description}</p>
-                                <div className="flex gap-2 pt-2 border-t border-gray-100">
-                                    <button 
-                                        onClick={() => handleReviewItem(opp, idx)}
-                                        className="flex-1 flex items-center justify-center bg-primary text-white py-2 rounded text-sm font-medium hover:bg-accent-hover transition-colors"
-                                    >
-                                        <PenTool size={14} className="mr-2" /> Review & Edit
-                                    </button>
-                                    <button
-                                        onClick={() => handleRejectItem(idx)}
-                                        className="px-3 py-2 bg-red-50 text-red-600 border border-red-100 rounded hover:bg-red-100"
-                                        title="Reject & Teach AI"
-                                    >
-                                        <Trash2 size={16} />
-                                    </button>
-                                    <a 
-                                        href={opp.sourceUrl} 
-                                        target="_blank" 
-                                        rel="noreferrer"
-                                        className="px-3 py-2 border border-gray-300 rounded text-gray-600 hover:bg-gray-50"
-                                        title="Check Source"
-                                    >
-                                        <Globe size={16} />
-                                    </a>
-                                </div>
-                            </div>
-                        ))
+                            );
+                        })
                     )}
                  </div>
             </div>
